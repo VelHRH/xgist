@@ -85,8 +85,13 @@ The Worker needs to read/write `users.json` in your repo.
    - `GH_TOKEN` — from step 5
    - `GH_REPO` — e.g. `YOURNAME/xdigest`
    - `WEBHOOK_SECRET` — any random string you invent (e.g. from a password generator)
-3. Add one plain **variable** (not secret): `BOT_USERNAME` — your bot's
-   username without the `@` (used by the landing page button).
+3. Add plain **variables** (not secrets):
+   - `BOT_USERNAME` — your bot's username without the `@` (used by the landing page button)
+   - `ADMIN_USERNAME` — your Telegram username without `@` (e.g. `velhrh`) —
+     grants you the admin commands
+   - `ADMIN_ID` (recommended) — your numeric Telegram id; send `/id` to the
+     bot once it's live, then add this. Usernames can be released and
+     re-claimed by strangers; the numeric id is the tamper-proof check.
 4. Copy the worker URL (like `https://xdigest.YOURNAME.workers.dev`).
 
 The worker URL doubles as your **landing page**: opening it in a browser shows
@@ -141,10 +146,17 @@ See `/help` in the bot. Summary: `/channel`, `/add`, `/remove`, `/list`,
 
 Anyone who talks to the bot can configure their own sources, hours and
 channel — configs live in `users.json`, one entry per Telegram user. Sources
-are fetched once per run regardless of how many users watch them. The
-`MAX_HOURS` / `MAX_SOURCES` constants in `worker/worker.js` are the natural
-hooks for paid plans later (Telegram Stars is the native payment method for
-bots).
+are fetched once per run regardless of how many users watch them.
+
+**Plans:** free users get 1 digest time/day and 5 sources; whitelisted users
+get 6 times/day and 25 sources (the `LIMITS` table in `worker/worker.js`).
+Paid plans later plug into the same check via Telegram Stars.
+
+**Admin commands** (only for `ADMIN_USERNAME`/`ADMIN_ID`):
+`/whitelist <id>` and `/unwhitelist <id>` grant/revoke free pro access (ask
+the person to send `/id` to the bot to learn their id), `/whitelisted` lists
+ids, `/users` shows everyone registered. Whitelist yourself and your other
+accounts right after setup.
 
 ## Extending to other platforms (Instagram, etc.)
 

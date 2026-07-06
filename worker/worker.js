@@ -12,6 +12,9 @@
  *
  * Plain variables (not secret):
  *   BOT_USERNAME    — bot username without @, used by the landing page CTA
+ *   ADMIN_USERNAME  — Telegram username (without @) that gets admin commands
+ *   ADMIN_ID        — optional but recommended: admin's numeric Telegram id
+ *                     (usernames can be released and re-claimed; ids cannot)
  *
  * GET requests serve the landing page (plus /robots.txt and /sitemap.xml);
  * POST requests are the Telegram webhook.
@@ -31,10 +34,45 @@ Tuning:
 /limit 3 — max posts proposed per digest (1-5)
 /interests crypto, AI research — what counts as interesting for you
 /style short punchy Ukrainian summaries — how captions should be written
-/settings — show your current config`;
+/settings — show your current config
+/id — show your numeric Telegram id`;
 
-const MAX_SOURCES = 25;
-const MAX_HOURS = 6; // pricing hook: hours per day == plan size
+const ADMIN_HELP = `
+
+Admin:
+/whitelist <id> — give a user pro limits for free
+/unwhitelist <id> — revoke
+/whitelisted — list whitelisted ids
+/users — list all registered users`;
+
+// Free vs pro limits. Whitelisted users (and the admin) get pro; later,
+// paying users plug into the same check.
+const LIMITS = {
+  free: { sources: 5, hours: 1 },
+  pro: { sources: 25, hours: 6 },
+};
+
+function isAdminUser(from, env) {
+  if (!from) return false;
+  if (env.ADMIN_ID && String(from.id) === String(env.ADMIN_ID)) return true;
+  return !!(env.ADMIN_USERNAME && from.username &&
+    from.username.toLowerCase() === env.ADMIN_USERNAME.replace(/^@/, "").toLowerCase());
+}
+
+function limitsFor(config, chatId, isAdmin) {
+  const pro = isAdmin || (config.whitelist || []).includes(String(chatId));
+  return LIMITS[pro ? "pro" : "free"];
+}
+
+/** Warn about missing setup steps — digests silently skip incomplete users. */
+function setupHints({ channel, sources }) {
+  const missing = [];
+  if (!channel) missing.push("• /channel — where approved posts go");
+  if (!sources?.length) missing.push("• /add — X accounts to watch");
+  return missing.length
+    ? "\n\n⚠️ Digests won't start until you also set:\n" + missing.join("\n")
+    : "";
+}
 
 export default {
   async fetch(request, env) {
@@ -145,11 +183,15 @@ async function handleMessage(msg, env) {
   const [rawCmd, ...rest] = msg.text.trim().split(/\s+/);
   const cmd = rawCmd.split("@")[0].toLowerCase();
   const arg = rest.join(" ").trim();
+  const isAdmin = isAdminUser(msg.from, env);
 
   switch (cmd) {
     case "/start":
     case "/help":
-      return reply(env, chatId, HELP);
+      return reply(env, chatId, HELP + (isAdmin ? ADMIN_HELP : ""));
+
+    case "/id":
+      return reply(env, chatId, `Your id: ${msg.from.id}`);
 
     case "/channel": {
       if (!/^@[a-zA-Z0-9_]{4,}$/.test(arg) && !/^-100\d+$/.test(arg)) {
@@ -157,17 +199,29 @@ async function handleMessage(msg, env) {
           "Usage: /channel @yourchannel\n(or forward me a message from a private channel)");
       }
       const value = arg.startsWith("@") ? arg : Number(arg);
+      const { config } = await loadConfig(env);
+      const u0 = config.users?.[String(chatId)];
       return setField(env, chatId, (u) => { u.channel = value; },
-        `Channel set to ${arg}. Make sure I'm an admin there with "Post messages" permission.`);
+        `Channel set to ${arg}. Make sure I'm an admin there with "Post messages" permission.` +
+        setupHints({ channel: value, sources: u0?.sources }));
     }
 
     case "/add": {
       const handles = arg.split(/[,\s@]+/).map((h) => h.toLowerCase())
         .filter((h) => /^[a-z0-9_]{1,15}$/.test(h));
       if (!handles.length) return reply(env, chatId, "Usage: /add naval pmarca");
+      const { config } = await loadConfig(env);
+      const max = limitsFor(config, chatId, isAdmin).sources;
+      const current = config.users?.[String(chatId)]?.sources || [];
+      const merged = [...new Set([...current, ...handles])];
+      if (merged.length > max) {
+        return reply(env, chatId,
+          `Your plan includes up to ${max} accounts (you'd have ${merged.length}).`);
+      }
       return setField(env, chatId, (u) => {
-        u.sources = [...new Set([...u.sources, ...handles])].slice(0, MAX_SOURCES);
-      }, `Now watching: ${handles.map((h) => "@" + h).join(", ")}`);
+        u.sources = [...new Set([...u.sources, ...handles])].slice(0, max);
+      }, `Now watching: ${handles.map((h) => "@" + h).join(", ")}` +
+         setupHints({ channel: config.users?.[String(chatId)]?.channel, sources: merged }));
     }
 
     case "/remove": {
@@ -188,11 +242,15 @@ async function handleMessage(msg, env) {
       const hours = [...new Set(arg.split(/[,\s]+/).map(Number)
         .filter((h) => Number.isInteger(h) && h >= 0 && h <= 23))].sort((a, b) => a - b);
       if (!hours.length) return reply(env, chatId, "Usage: /times 9,18");
-      if (hours.length > MAX_HOURS) {
-        return reply(env, chatId, `Max ${MAX_HOURS} digest times per day for now.`);
+      const { config } = await loadConfig(env);
+      const max = limitsFor(config, chatId, isAdmin).hours;
+      if (hours.length > max) {
+        return reply(env, chatId, `Your plan includes up to ${max} digest time(s) per day.`);
       }
+      const u0 = config.users?.[String(chatId)];
       return setField(env, chatId, (u) => { u.hours = hours; },
-        `Digests at: ${hours.map((h) => h + ":00").join(", ")} (your timezone)`);
+        `Digests at: ${hours.map((h) => h + ":00").join(", ")} (your timezone)` +
+        setupHints({ channel: u0?.channel, sources: u0?.sources }));
     }
 
     case "/timezone": {
@@ -219,11 +277,62 @@ async function handleMessage(msg, env) {
     case "/settings": {
       const { config } = await loadConfig(env);
       const u = config.users[String(chatId)] || userDefaults();
-      return reply(env, chatId, JSON.stringify(u, null, 2));
+      const pro = isAdmin || (config.whitelist || []).includes(String(chatId));
+      return reply(env, chatId,
+        JSON.stringify(u, null, 2) + `\n\nPlan: ${pro ? "pro" : "free"}`);
+    }
+
+    case "/whitelist":
+    case "/unwhitelist": {
+      if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
+      if (!/^\d+$/.test(arg)) {
+        return reply(env, chatId,
+          `Usage: ${cmd} <numeric id>\n(the user can get theirs with /id)`);
+      }
+      const adding = cmd === "/whitelist";
+      return mutateConfig(env, chatId, (config) => {
+        const list = new Set(config.whitelist || []);
+        adding ? list.add(arg) : list.delete(arg);
+        config.whitelist = [...list].sort();
+      }, adding ? `Whitelisted ${arg} — they now have pro limits.` : `Removed ${arg} from the whitelist.`);
+    }
+
+    case "/whitelisted": {
+      if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
+      const { config } = await loadConfig(env);
+      const list = config.whitelist || [];
+      return reply(env, chatId, list.length ? list.join("\n") : "Whitelist is empty.");
+    }
+
+    case "/users": {
+      if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
+      const { config } = await loadConfig(env);
+      const lines = Object.entries(config.users || {}).map(([id, u]) =>
+        `${id} → ${u.channel || "no channel"}, ${u.sources.length} sources, ` +
+        `${(u.hours || []).length} time(s)/day`);
+      return reply(env, chatId, lines.length ? lines.join("\n") : "No users yet.");
     }
 
     default:
       return reply(env, chatId, "Unknown command. /help");
+  }
+}
+
+/** Mutate top-level config (whitelist etc.) with one retry on sha conflicts. */
+async function mutateConfig(env, chatId, mutate, confirmation) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { config, sha } = await loadConfig(env);
+    config.users ||= {};
+    mutate(config);
+    try {
+      await saveConfig(env, config, sha);
+      return reply(env, chatId, confirmation);
+    } catch (err) {
+      if (attempt === 1) {
+        console.log("config save failed twice:", err);
+        return reply(env, chatId, "Storage hiccup, please try again.");
+      }
+    }
   }
 }
 
@@ -374,38 +483,63 @@ function landingHTML(origin, botUser) {
 <meta property="og:url" content="${origin}/">
 <meta name="twitter:card" content="summary">
 <script type="application/ld+json">${JSON.stringify(jsonLd)}</script>
+<meta name="theme-color" content="#0e1621">
 <style>
-  :root { --ink:#1a1d16; --paper:#f6f4ec; --accent:#b4552d; }
+  :root { --bg:#0e1621; --surface:#17212b; --line:#243342; --ink:#e7edf3;
+          --muted:#8b98a5; --accent:#2aabee; --accent2:#229ed9; }
   * { box-sizing:border-box; margin:0; }
-  body { font:17px/1.6 Georgia,'Times New Roman',serif; color:var(--ink);
-         background:var(--paper); }
-  main { max-width:680px; margin:0 auto; padding:48px 20px 80px; }
-  h1 { font-size:2.3rem; line-height:1.2; margin:24px 0 16px; }
-  h2 { font-size:1.4rem; margin:56px 0 16px; }
-  em { color:var(--accent); font-style:italic; }
-  p.lead { font-size:1.15rem; }
-  .cta { display:inline-block; margin:28px 0; padding:14px 28px; background:var(--accent);
-         color:#fff; text-decoration:none; font-family:system-ui,sans-serif;
-         font-size:1rem; border-radius:6px; }
-  .cta:hover { filter:brightness(1.08); }
-  ol.steps { padding-left:1.2em; } ol.steps li { margin:10px 0; }
+  body { font:16px/1.65 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+         background:var(--bg); color:var(--ink); }
+  main { max-width:720px; margin:0 auto; padding:64px 20px 80px; }
+  .badge { display:inline-block; font-size:.78rem; font-weight:600; letter-spacing:.08em;
+           text-transform:uppercase; color:var(--accent); background:var(--surface);
+           border:1px solid var(--line); border-radius:999px; padding:5px 14px; }
+  h1 { font-size:2.5rem; line-height:1.15; margin:22px 0 16px; font-weight:800;
+       letter-spacing:-.02em; }
+  em { color:var(--accent); font-style:normal; }
+  p.lead { font-size:1.12rem; color:var(--muted); }
+  .cta { display:inline-block; margin:30px 0 6px; padding:15px 30px;
+         background:linear-gradient(135deg,var(--accent),var(--accent2));
+         color:#fff; text-decoration:none; font-weight:600; font-size:1.02rem;
+         border-radius:10px; box-shadow:0 6px 24px rgba(42,171,238,.30); }
+  .cta:hover { filter:brightness(1.1); }
+  .hint { font-size:.85rem; color:var(--muted); }
+  h2 { font-size:1.3rem; margin:56px 0 18px; padding-left:12px;
+       border-left:3px solid var(--accent); }
+  ol.steps { list-style:none; padding:0; counter-reset:step; }
+  ol.steps li { counter-increment:step; margin:12px 0; padding:14px 16px 14px 56px;
+                position:relative; background:var(--surface);
+                border:1px solid var(--line); border-radius:12px; }
+  ol.steps li::before { content:counter(step); position:absolute; left:16px; top:50%;
+       transform:translateY(-50%); width:26px; height:26px; border-radius:50%;
+       background:rgba(42,171,238,.15); color:var(--accent); font-weight:700;
+       display:flex; align-items:center; justify-content:center; font-size:.88rem; }
+  code { font-family:ui-monospace,Consolas,monospace; background:#1c2733;
+         color:#7fd0ff; padding:2px 8px; border-radius:6px; font-size:.9em; }
   ul.features { list-style:none; padding:0; }
-  ul.features li { margin:12px 0; padding-left:26px; position:relative; }
-  ul.features li::before { content:"→"; position:absolute; left:0; color:var(--accent); }
-  details { border-bottom:1px solid #ddd8c8; padding:12px 0; }
-  summary { cursor:pointer; font-weight:bold; }
-  details p { margin-top:8px; color:#3d4035; }
-  footer { margin-top:72px; font-size:.85rem; color:#8a8676;
-           font-family:system-ui,sans-serif; }
+  ul.features li { margin:10px 0; padding:12px 16px 12px 44px; position:relative;
+                   background:var(--surface); border:1px solid var(--line);
+                   border-radius:12px; }
+  ul.features li::before { content:"✓"; position:absolute; left:17px;
+                           color:var(--accent); font-weight:700; }
+  details { background:var(--surface); border:1px solid var(--line);
+            border-radius:12px; padding:14px 18px; margin:10px 0; }
+  summary { cursor:pointer; font-weight:600; }
+  details p { margin-top:10px; color:var(--muted); }
+  a { color:var(--accent); }
+  footer { margin-top:72px; padding-top:20px; border-top:1px solid var(--line);
+           font-size:.85rem; color:var(--muted); }
 </style>
 </head>
 <body>
 <main>
+  <span class="badge">Telegram bot · free early access</span>
   <h1>Your Telegram channel, fed by the <em>best</em> of X — automatically</h1>
   <p class="lead">XDigest watches the X (Twitter) accounts you choose, picks the
   posts worth reposting and sends them to you at the hours you set. One tap —
   published to your channel, media and caption included.</p>
   <a class="cta" href="${botLink}">Open the bot in Telegram →</a>
+  <p class="hint">No passwords, no API keys — you approve every post.</p>
 
   <h2>How it works</h2>
   <ol class="steps">
