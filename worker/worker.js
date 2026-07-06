@@ -29,6 +29,7 @@ Setup:
 /timezone Europe/Kyiv — your IANA timezone
 
 Tuning:
+/lang en|uk|ru — language of generated posts (default: en)
 /remove handle — stop watching an account
 /list — show watched accounts
 /limit 3 — max posts proposed per digest (1-5)
@@ -164,7 +165,7 @@ async function saveConfig(env, config, sha) {
 
 function userDefaults() {
   return { channel: null, sources: [], hours: [9], timezone: null,
-           limit: 3, interests: null, style: null };
+           limit: 3, interests: null, style: null, language: "en" };
 }
 
 async function handleMessage(msg, env) {
@@ -265,6 +266,17 @@ async function handleMessage(msg, env) {
       const n = Number(arg);
       if (!Number.isInteger(n) || n < 1 || n > 5) return reply(env, chatId, "Usage: /limit 3 (1-5)");
       return setField(env, chatId, (u) => { u.limit = n; }, `Up to ${n} posts per digest.`);
+    }
+
+    case "/lang":
+    case "/language": {
+      const lang = arg.toLowerCase();
+      if (!["en", "uk", "ru"].includes(lang)) {
+        return reply(env, chatId, "Usage: /lang en | uk | ru");
+      }
+      const names = { en: "English", uk: "Ukrainian", ru: "Russian" };
+      return setField(env, chatId, (u) => { u.language = lang; },
+        `Posts will be written in ${names[lang]}.`);
     }
 
     case "/interests":

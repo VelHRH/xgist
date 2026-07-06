@@ -8,17 +8,15 @@ from .config import CLAUDE_MODEL
 log = logging.getLogger(__name__)
 
 
-def tweet_url(tweet: dict) -> str:
-    return f"https://x.com/{tweet['source']}/status/{tweet['id']}"
+LANGUAGES = {"en": "English", "uk": "Ukrainian", "ru": "Russian"}
 
 
 def make_caption(tweet: dict, user: dict) -> str:
-    link = tweet_url(tweet)
-    fallback = (tweet["text"][:900] + "\n\n" + link).strip()
+    fallback = tweet["text"][:900].strip()
     if not tweet["text"] or not os.getenv("ANTHROPIC_API_KEY"):
         return fallback
     try:
-        return _claude_caption(tweet, user) + "\n\n" + link
+        return _claude_caption(tweet, user)
     except Exception:
         log.exception("caption generation failed, using raw tweet text")
         return fallback
@@ -27,9 +25,8 @@ def make_caption(tweet: dict, user: dict) -> str:
 def _claude_caption(tweet: dict, user: dict) -> str:
     import anthropic
 
-    style = user.get("style") or (
-        "keep the original language of the tweet; concise, neutral channel tone; no hashtags"
-    )
+    language = LANGUAGES.get(user.get("language") or "en", "English")
+    style = user.get("style") or "concise, neutral channel tone; no hashtags"
     client = anthropic.Anthropic()
     response = client.messages.create(
         model=CLAUDE_MODEL,
@@ -37,8 +34,10 @@ def _claude_caption(tweet: dict, user: dict) -> str:
         system=(
             "You write posts for a Telegram channel based on tweets. "
             "Rewrite the tweet as a clean, self-contained channel post. "
-            "Plain text only, under 800 characters, no preamble, no quotes around it, "
-            "do not include any links (a source link is appended separately). "
+            f"Write the post in {language}, translating if the tweet is in "
+            "another language. "
+            "Plain text only, under 800 characters, no preamble, no quotes "
+            "around it, no links. "
             f"Style guide from the channel owner: {style}"
         ),
         messages=[{
