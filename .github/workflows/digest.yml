@@ -9,6 +9,10 @@ on:
         description: "Run for all configured users right now"
         type: boolean
         default: false
+      only_user:
+        description: "Run immediately for this chat id only (testing)"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -41,6 +45,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FORCE_ALL: ${{ inputs.force == true && '1' || '' }}
+          FORCE_USER: ${{ inputs.only_user }}
           DEFAULT_TZ: ${{ vars.DEFAULT_TZ || 'Europe/Kyiv' }}
         run: python -m pipeline.digest
 

@@ -43,7 +43,8 @@ Admin:
 /whitelist <id> — give a user pro limits for free
 /unwhitelist <id> — revoke
 /whitelisted — list whitelisted ids
-/users — list all registered users`;
+/users — list all registered users
+/gen_digest_now — run your digest immediately (testing)`;
 
 // Free vs pro limits. Whitelisted users (and the admin) get pro; later,
 // paying users plug into the same check.
@@ -302,6 +303,27 @@ async function handleMessage(msg, env) {
       const { config } = await loadConfig(env);
       const list = config.whitelist || [];
       return reply(env, chatId, list.length ? list.join("\n") : "Whitelist is empty.");
+    }
+
+    case "/gen_digest_now": {
+      if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
+      const resp = await fetch(
+        `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/digest.yml/dispatches`,
+        {
+          method: "POST",
+          headers: ghHeaders(env),
+          body: JSON.stringify({ ref: "main", inputs: { only_user: String(chatId) } }),
+        },
+      );
+      if (resp.status !== 204) {
+        const detail = await resp.text();
+        console.log("dispatch failed:", resp.status, detail);
+        return reply(env, chatId,
+          `Couldn't start the workflow (HTTP ${resp.status}). ` +
+          `Check that GH_TOKEN has "Actions: Read and write" permission.`);
+      }
+      return reply(env, chatId,
+        "Digest started 🚀 GitHub needs ~1–2 min to spin up; previews will arrive here.");
     }
 
     case "/users": {

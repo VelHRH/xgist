@@ -55,8 +55,15 @@ def main() -> None:
     users = load_users()
     state = load_state()
 
-    due = {uid: cfg for uid, cfg in users.items()
-           if _is_due(cfg, state.get(uid, {}), now)}
+    force_user = os.getenv("FORCE_USER", "").strip()
+    if force_user:
+        due = {force_user: users[force_user]} if force_user in users else {}
+        if not due:
+            log.error("FORCE_USER %s is not a registered user", force_user)
+            return
+    else:
+        due = {uid: cfg for uid, cfg in users.items()
+               if _is_due(cfg, state.get(uid, {}), now)}
     if not due:
         log.info("no users due at %s UTC", now.strftime("%H:%M"))
         return
@@ -95,9 +102,13 @@ def main() -> None:
             except Exception:
                 log.exception("failed to preview tweet %s for user %s", tweet["id"], uid)
 
-        if sent == 0 and cfg.get("notify_empty"):
+        if sent == 0 and (cfg.get("notify_empty") or force_user):
             try:
-                tg.send_text(int(uid), "Nothing interesting from your sources this time.")
+                tg.send_text(
+                    int(uid),
+                    "Nothing new from your sources in the window."
+                    if cfg.get("sources") else
+                    "You have no sources yet — /add some X accounts first.")
             except Exception:
                 log.exception("failed to notify user %s", uid)
 

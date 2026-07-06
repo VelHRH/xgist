@@ -72,7 +72,9 @@ The Worker needs to read/write `users.json` in your repo.
 1. GitHub → Settings (your profile) → Developer settings →
    **Fine-grained personal access tokens** → Generate new token.
 2. Repository access: *Only select repositories* → your repo.
-3. Permissions → Repository permissions → **Contents: Read and write**.
+3. Permissions → Repository permissions → **Contents: Read and write**
+   and **Actions: Read and write** (the second one lets the bot's
+   `/gen_digest_now` admin command trigger a run).
 4. Save the token — this is `GH_TOKEN`.
 
 ### 6. Deploy the Cloudflare Worker
