@@ -113,6 +113,11 @@ curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<WORKER_URL>&secret
 
 Expected reply: `{"ok":true,...,"description":"Webhook was set"}`.
 
+Then open `<WORKER_URL>/setup-commands?key=<WEBHOOK_SECRET>` in the browser
+once — this registers the bot's "/" command autocomplete menu in Telegram
+(re-open it after ever changing the command list, or after setting `ADMIN_ID`
+to also get admin commands in your autocomplete).
+
 ### 8. Configure yourself as the first user
 
 1. Create your Telegram channel (or use an existing one).

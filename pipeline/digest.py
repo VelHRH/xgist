@@ -93,10 +93,13 @@ def main() -> None:
                     continue
                 caption = make_caption(tweet, cfg)
                 content_ids = tg.send_preview(int(uid), media, caption)
+                dest = cfg["channel"] if isinstance(cfg["channel"], str) else "your channel"
                 tg.send_controls(
                     int(uid), content_ids,
-                    f"@{tweet['source']} · ❤️ {tweet['favorites']} · 🔁 {tweet['retweets']}"
-                    f"\nPublish to {cfg['channel']}?",
+                    f'<a href="https://x.com/{tweet["source"]}/status/{tweet["id"]}">'
+                    f'@{tweet["source"]}</a>'
+                    f" · ❤️ {tweet['favorites']} · 🔁 {tweet['retweets']}"
+                    f"\nPublish to {dest}?",
                 )
                 sent += 1
             except Exception:

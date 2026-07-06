@@ -62,6 +62,8 @@ def send_controls(chat_id: int, content_ids: list[int], label: str) -> None:
         {"text": "❌ Skip", "callback_data": "s"},
     ]]}
     call("sendMessage", chat_id=chat_id, text=label[:4096],
+         parse_mode="HTML",
+         link_preview_options=json.dumps({"is_disabled": True}),
          reply_markup=json.dumps(keyboard))
 
 

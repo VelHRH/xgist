@@ -20,23 +20,28 @@
  * POST requests are the Telegram webhook.
  */
 
-const HELP = `X → Telegram digest bot
+const HELP = `🤖 XDigest — the best of X, straight to your Telegram channel
 
-Setup:
-/channel @yourchannel — where approved posts go (add me as channel admin with "Post messages" first; for a private channel, forward me any message from it instead)
-/add handle1 handle2 — X accounts to watch
-/times 9,18 — hours (0-23) you want digests, in your timezone
-/timezone Europe/Kyiv — your IANA timezone
+Setup — 3 steps:
 
-Tuning:
-/lang en|uk|ru — language of generated posts (default: en)
-/remove handle — stop watching an account
-/list — show watched accounts
-/limit 3 — max posts proposed per digest (1-5)
-/interests crypto, AI research — what counts as interesting for you
-/style short punchy Ukrainian summaries — how captions should be written
-/settings — show your current config
-/id — show your numeric Telegram id`;
+1️⃣ /channel @yourchannel — connect your channel
+(first add me as its admin with the "Post messages" permission; private channel? just forward me any message from it)
+
+2️⃣ /add @naval @pmarca — X (Twitter) accounts to watch
+
+3️⃣ /schedule 9,18 — hours (0-23) when I bring you a digest
+
+At those hours you'll get previews here. Tap ✅ Post — it's in your channel. Tap ❌ Skip — nobody ever sees it.
+
+Fine-tuning:
+🌐 /lang en | uk | ru — post language (default: en)
+✍️ /post_style short, witty, no emoji — how to write captions
+📋 /list — accounts you watch
+🗑 /remove @handle — stop watching one
+🔢 /limit 3 — max posts per digest (1-5)
+🌍 /timezone Europe/Kyiv — your timezone
+⚙️ /settings — your current setup
+🆔 /id — your Telegram id`;
 
 const ADMIN_HELP = `
 
@@ -111,7 +116,70 @@ async function tg(env, method, params) {
   return data;
 }
 
-const reply = (env, chatId, text) => tg(env, "sendMessage", { chat_id: chatId, text });
+// All bot replies use HTML parse mode; escape any user-provided text with esc().
+const reply = (env, chatId, text, extra = {}) => tg(env, "sendMessage", {
+  chat_id: chatId,
+  text,
+  parse_mode: "HTML",
+  link_preview_options: { is_disabled: true },
+  ...extra,
+});
+
+// Persistent menu keyboard; button taps are mapped back to commands below.
+const MENU = {
+  keyboard: [
+    [{ text: "⚙️ Settings" }, { text: "📋 My accounts" }],
+    [{ text: "❓ Help" }],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
+};
+const MENU_BUTTONS = {
+  "⚙️ Settings": "/settings",
+  "📋 My accounts": "/list",
+  "❓ Help": "/help",
+};
+
+// Registered in Telegram's "/" autocomplete via GET /setup-commands?key=<WEBHOOK_SECRET>
+const COMMANDS = [
+  ["channel", "connect your channel: @name"],
+  ["add", "watch X accounts: @naval @pmarca"],
+  ["schedule", "digest hours: 9,18"],
+  ["lang", "post language: en | uk | ru"],
+  ["post_style", "how to write captions"],
+  ["list", "accounts you watch"],
+  ["remove", "stop watching: @handle"],
+  ["limit", "posts per digest: 1-5"],
+  ["timezone", "e.g. Europe/Kyiv"],
+  ["settings", "your current setup"],
+  ["help", "how it all works"],
+];
+const ADMIN_COMMANDS = [
+  ["gen_digest_now", "run your digest now (admin)"],
+  ["whitelist", "grant pro to an id (admin)"],
+  ["unwhitelist", "revoke pro (admin)"],
+  ["whitelisted", "list whitelisted ids (admin)"],
+  ["users", "list all users (admin)"],
+];
+
+async function setupCommands(env) {
+  const toApi = (pairs) => pairs.map(([command, description]) => ({ command, description }));
+  const results = [await tg(env, "setMyCommands", { commands: toApi(COMMANDS) })];
+  if (env.ADMIN_ID) {
+    results.push(await tg(env, "setMyCommands", {
+      commands: toApi([...COMMANDS, ...ADMIN_COMMANDS]),
+      scope: { type: "chat", chat_id: Number(env.ADMIN_ID) },
+    }));
+  }
+  return results;
+}
+
+const esc = (s) => String(s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// Link an X handle to x.com — a bare @handle in a message would render as a
+// (wrong) Telegram profile link.
+const xlink = (h) => `<a href="https://x.com/${h}">@${h}</a>`;
 
 /* ---------------- GitHub-backed config ---------------- */
 
@@ -176,13 +244,14 @@ async function handleMessage(msg, env) {
   const fwd = msg.forward_origin;
   if (fwd?.type === "channel") {
     await setField(env, chatId, (u) => { u.channel = fwd.chat.id; },
-      `Channel set to "${fwd.chat.title}" (${fwd.chat.id}). ` +
+      `📢 Channel set to "${esc(fwd.chat.title)}". ` +
       `Make sure I'm an admin there with "Post messages" permission.`);
     return;
   }
 
   if (!msg.text) return;
-  const [rawCmd, ...rest] = msg.text.trim().split(/\s+/);
+  const text = MENU_BUTTONS[msg.text.trim()] || msg.text.trim();
+  const [rawCmd, ...rest] = text.split(/\s+/);
   const cmd = rawCmd.split("@")[0].toLowerCase();
   const arg = rest.join(" ").trim();
   const isAdmin = isAdminUser(msg.from, env);
@@ -190,7 +259,8 @@ async function handleMessage(msg, env) {
   switch (cmd) {
     case "/start":
     case "/help":
-      return reply(env, chatId, HELP + (isAdmin ? ADMIN_HELP : ""));
+      return reply(env, chatId, HELP + (isAdmin ? ADMIN_HELP : ""),
+        { reply_markup: MENU });
 
     case "/id":
       return reply(env, chatId, `Your id: ${msg.from.id}`);
@@ -204,14 +274,14 @@ async function handleMessage(msg, env) {
       const { config } = await loadConfig(env);
       const u0 = config.users?.[String(chatId)];
       return setField(env, chatId, (u) => { u.channel = value; },
-        `Channel set to ${arg}. Make sure I'm an admin there with "Post messages" permission.` +
+        `📢 Channel set to ${esc(arg)}. Make sure I'm an admin there with "Post messages" permission.` +
         setupHints({ channel: value, sources: u0?.sources }));
     }
 
     case "/add": {
       const handles = arg.split(/[,\s@]+/).map((h) => h.toLowerCase())
         .filter((h) => /^[a-z0-9_]{1,15}$/.test(h));
-      if (!handles.length) return reply(env, chatId, "Usage: /add naval pmarca");
+      if (!handles.length) return reply(env, chatId, "Usage: /add @naval @pmarca");
       const { config } = await loadConfig(env);
       const max = limitsFor(config, chatId, isAdmin).sources;
       const current = config.users?.[String(chatId)]?.sources || [];
@@ -222,7 +292,7 @@ async function handleMessage(msg, env) {
       }
       return setField(env, chatId, (u) => {
         u.sources = [...new Set([...u.sources, ...handles])].slice(0, max);
-      }, `Now watching: ${handles.map((h) => "@" + h).join(", ")}` +
+      }, `👀 Now watching: ${handles.map(xlink).join(", ")}` +
          setupHints({ channel: config.users?.[String(chatId)]?.channel, sources: merged }));
     }
 
@@ -230,20 +300,26 @@ async function handleMessage(msg, env) {
       const handle = arg.replace(/^@/, "").toLowerCase();
       return setField(env, chatId, (u) => {
         u.sources = u.sources.filter((s) => s !== handle);
-      }, `Removed @${handle}`);
+      }, `🗑 Removed <code>@${esc(handle)}</code>`);
     }
 
     case "/list": {
       const { config } = await loadConfig(env);
       const u = config.users[String(chatId)];
       return reply(env, chatId,
-        u?.sources?.length ? u.sources.map((s) => "@" + s).join("\n") : "No sources yet. /add some!");
+        u?.sources?.length
+          ? "👀 You're watching:\n" + u.sources.map(xlink).join("\n")
+          : "You're not watching anyone yet — try /add @naval");
     }
 
-    case "/times": {
+    case "/times":
+    case "/schedule": {
       const hours = [...new Set(arg.split(/[,\s]+/).map(Number)
         .filter((h) => Number.isInteger(h) && h >= 0 && h <= 23))].sort((a, b) => a - b);
-      if (!hours.length) return reply(env, chatId, "Usage: /times 9,18");
+      if (!hours.length) {
+        return reply(env, chatId,
+          "Usage: /schedule 9,18 — the hours (0-23) when you want your digest, in your timezone");
+      }
       const { config } = await loadConfig(env);
       const max = limitsFor(config, chatId, isAdmin).hours;
       if (hours.length > max) {
@@ -251,7 +327,7 @@ async function handleMessage(msg, env) {
       }
       const u0 = config.users?.[String(chatId)];
       return setField(env, chatId, (u) => { u.hours = hours; },
-        `Digests at: ${hours.map((h) => h + ":00").join(", ")} (your timezone)` +
+        `🕘 Digest schedule: ${hours.map((h) => String(h).padStart(2, "0") + ":00").join(", ")} (your timezone)` +
         setupHints({ channel: u0?.channel, sources: u0?.sources }));
     }
 
@@ -276,23 +352,37 @@ async function handleMessage(msg, env) {
       }
       const names = { en: "English", uk: "Ukrainian", ru: "Russian" };
       return setField(env, chatId, (u) => { u.language = lang; },
-        `Posts will be written in ${names[lang]}.`);
+        `🌐 Posts will be written in ${names[lang]}.`);
     }
 
+    // Hidden power-user command (not in /help): steers what "interesting" means.
     case "/interests":
       return setField(env, chatId, (u) => { u.interests = arg || null; },
         arg ? "Interests saved." : "Interests cleared.");
 
     case "/style":
+    case "/post_style":
       return setField(env, chatId, (u) => { u.style = arg || null; },
-        arg ? "Caption style saved." : "Caption style cleared.");
+        arg ? "✍️ Caption style saved." : "✍️ Caption style reset to default.");
 
     case "/settings": {
       const { config } = await loadConfig(env);
       const u = config.users[String(chatId)] || userDefaults();
       const pro = isAdmin || (config.whitelist || []).includes(String(chatId));
-      return reply(env, chatId,
-        JSON.stringify(u, null, 2) + `\n\nPlan: ${pro ? "pro" : "free"}`);
+      const langNames = { en: "English", uk: "Ukrainian", ru: "Russian" };
+      const lines = [
+        "⚙️ <b>Your setup</b>",
+        "",
+        `📢 Channel: ${u.channel ? esc(String(u.channel)) : "not set — /channel @yourchannel"}`,
+        `👀 Watching: ${u.sources?.length ? u.sources.map(xlink).join(", ") : "nobody — /add @naval"}`,
+        `🕘 Schedule: ${(u.hours || []).map((h) => String(h).padStart(2, "0") + ":00").join(", ")}`,
+        `🌍 Timezone: ${u.timezone ? esc(u.timezone) : "Europe/Kyiv (default)"}`,
+        `🌐 Language: ${langNames[u.language || "en"]}`,
+        `✍️ Style: ${u.style ? esc(u.style) : "default"}`,
+        `🔢 Posts per digest: ${u.limit}`,
+        pro ? "⭐ Plan: pro" : "🆓 Plan: free",
+      ];
+      return reply(env, chatId, lines.join("\n"));
     }
 
     case "/whitelist":
@@ -419,8 +509,9 @@ async function handleCallback(cb, env) {
     if (!result.ok) {
       return answer(`Failed: ${result.description}. Am I an admin of ${user.channel}?`, true);
     }
+    const dest = typeof user.channel === "string" ? user.channel : "your channel";
     await tg(env, "editMessageText",
-      { chat_id: chatId, message_id: controlId, text: `✅ Posted to ${user.channel}` });
+      { chat_id: chatId, message_id: controlId, text: `✅ Posted to ${dest}` });
     return answer("Posted!");
   }
 
@@ -429,9 +520,19 @@ async function handleCallback(cb, env) {
 
 /* ---------------- Landing page (GET requests) ---------------- */
 
-function serveSite(request, env) {
+async function serveSite(request, env) {
   const url = new URL(request.url);
   const origin = url.origin;
+
+  // One-time setup: registers the "/" command autocomplete with Telegram.
+  if (url.pathname === "/setup-commands") {
+    if (url.searchParams.get("key") !== env.WEBHOOK_SECRET) {
+      return new Response("forbidden", { status: 403 });
+    }
+    const results = await setupCommands(env);
+    return new Response(JSON.stringify(results, null, 2),
+      { headers: { "content-type": "application/json" } });
+  }
 
   if (url.pathname === "/robots.txt") {
     return new Response(`User-agent: *\nAllow: /\nSitemap: ${origin}/sitemap.xml\n`, {
