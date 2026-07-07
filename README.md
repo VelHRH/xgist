@@ -155,9 +155,17 @@ Anyone who talks to the bot can configure their own sources, hours and
 channel — configs live in `users.json`, one entry per Telegram user. Sources
 are fetched once per run regardless of how many users watch them.
 
-**Plans:** free users get 1 digest time/day and 5 sources; whitelisted users
-get 6 times/day and 25 sources (the `LIMITS` table in `worker/worker.js`).
-Paid plans later plug into the same check via Telegram Stars.
+**Plans:** free users get 1 digest time/day and 5 sources; Pro users get
+6 times/day and 25 sources (the `LIMITS` table in `worker/worker.js`,
+mirrored by `FREE_*` constants in `pipeline/digest.py`).
+
+**Payments:** `/pro` sells a monthly auto-renewing subscription via Telegram
+Stars — no external payment provider needed. Price is the `PRO_PRICE_STARS`
+Worker variable (default 550 ≈ $7; you receive ~65-70% after Telegram/store
+fees). Stars accumulate on the bot's balance (@BotFather → your bot →
+Payments) and are withdrawn through fragment.com after a 21-day hold. Users
+manage/cancel the subscription in Telegram Settings → My Stars; when it
+lapses, the pipeline automatically clamps them back to free limits.
 
 **Admin commands** (only for `ADMIN_USERNAME`/`ADMIN_ID`):
 `/whitelist <id>` and `/unwhitelist <id>` grant/revoke free pro access (ask

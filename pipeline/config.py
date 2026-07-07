@@ -34,6 +34,10 @@ def load_users() -> dict:
     return _load_json(USERS_FILE, {"users": {}}).get("users", {})
 
 
+def load_whitelist() -> list:
+    return _load_json(USERS_FILE, {"users": {}}).get("whitelist", [])
+
+
 def load_state() -> dict:
     return _load_json(STATE_FILE, {"users": {}}).get("users", {})
 

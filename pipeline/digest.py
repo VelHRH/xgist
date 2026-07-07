@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from . import tg
 from .caption import make_caption
 from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, TMP_DIR, load_feedback,
-                     load_state, load_users, save_state)
+                     load_state, load_users, load_whitelist, save_state)
 from .fetch import fetch_source
 from .media import prepare
 from .rank import engagement, pick_top
@@ -39,6 +39,31 @@ def _is_due(cfg: dict, user_state: dict, now: datetime) -> bool:
     return last_run != local.strftime("%Y-%m-%d %H")
 
 
+# Mirrors LIMITS in worker/worker.js — keep the two in sync.
+FREE_HOURS = 1
+FREE_SOURCES = 5
+
+
+def _apply_plan(uid: str, cfg: dict, whitelist: list, now: datetime) -> dict:
+    """Clamp a lapsed/free user's config to free-tier limits.
+
+    The Worker enforces limits when settings change; this catches the case
+    where a paid subscription expired after the settings were saved.
+    """
+    paid = False
+    if cfg.get("paid_until"):
+        try:
+            paid = datetime.fromisoformat(cfg["paid_until"]) > now
+        except ValueError:
+            pass
+    if paid or uid in whitelist:
+        return cfg
+    clamped = dict(cfg)
+    clamped["hours"] = (cfg.get("hours") or [9])[:FREE_HOURS]
+    clamped["sources"] = (cfg.get("sources") or [])[:FREE_SOURCES]
+    return clamped
+
+
 def _window_start(user_state: dict, now: datetime) -> datetime:
     floor = now - timedelta(hours=MAX_TWEET_AGE_HOURS)
     last = user_state.get("last_digest_at")
@@ -53,7 +78,9 @@ def _window_start(user_state: dict, now: datetime) -> datetime:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     now = datetime.now(timezone.utc)
-    users = load_users()
+    whitelist = load_whitelist()
+    users = {uid: _apply_plan(uid, cfg, whitelist, now)
+             for uid, cfg in load_users().items()}
     state = load_state()
 
     force_user = os.getenv("FORCE_USER", "").strip()

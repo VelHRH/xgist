@@ -15,6 +15,7 @@
  *   ADMIN_USERNAME  — Telegram username (without @) that gets admin commands
  *   ADMIN_ID        — optional but recommended: admin's numeric Telegram id
  *                     (usernames can be released and re-claimed; ids cannot)
+ *   PRO_PRICE_STARS — monthly Pro price in Telegram Stars (default 550)
  *
  * GET requests serve the landing page (plus /robots.txt and /sitemap.xml);
  * POST requests are the Telegram webhook.
@@ -41,7 +42,8 @@ Fine-tuning:
 🔢 /limit 3 — max posts per digest (1-5)
 🌍 /timezone Europe/Kyiv — your timezone
 ⚙️ /settings — your current setup
-🆔 /id — your Telegram id`;
+🆔 /id — your Telegram id
+⭐ /pro — up to 6 digests/day and 25 accounts`;
 
 const ADMIN_HELP = `
 
@@ -66,8 +68,14 @@ function isAdminUser(from, env) {
     from.username.toLowerCase() === env.ADMIN_USERNAME.replace(/^@/, "").toLowerCase());
 }
 
+function hasPaidPro(user) {
+  return !!(user?.paid_until && Date.parse(user.paid_until) > Date.now());
+}
+
 function limitsFor(config, chatId, isAdmin) {
-  const pro = isAdmin || (config.whitelist || []).includes(String(chatId));
+  const pro = isAdmin
+    || (config.whitelist || []).includes(String(chatId))
+    || hasPaidPro(config.users?.[String(chatId)]);
   return LIMITS[pro ? "pro" : "free"];
 }
 
@@ -94,7 +102,13 @@ export default {
       return new Response("ok");
     }
     try {
-      if (update.callback_query) await handleCallback(update.callback_query, env);
+      if (update.pre_checkout_query) {
+        // Mandatory payment handshake — must be answered within 10 seconds.
+        await tg(env, "answerPreCheckoutQuery", {
+          pre_checkout_query_id: update.pre_checkout_query.id,
+          ok: true,
+        });
+      } else if (update.callback_query) await handleCallback(update.callback_query, env);
       else if (update.message) await handleMessage(update.message, env);
     } catch (err) {
       console.log("handler error:", err.stack || err);
@@ -160,6 +174,7 @@ const COMMANDS = [
   ["limit", "posts per digest: 1-5"],
   ["timezone", "e.g. Europe/Kyiv"],
   ["settings", "your current setup"],
+  ["pro", "upgrade to Pro ⭐"],
   ["help", "how it all works"],
 ];
 const ADMIN_COMMANDS = [
@@ -288,6 +303,19 @@ async function handleMessage(msg, env) {
     return;
   }
 
+  // Payment confirmation arrives as a service message, not a command.
+  if (msg.successful_payment) {
+    const sp = msg.successful_payment;
+    const until = sp.subscription_expiration_date
+      ? new Date(sp.subscription_expiration_date * 1000)
+      : new Date(Date.now() + 31 * 86400 * 1000);
+    await setField(env, chatId, (u) => { u.paid_until = until.toISOString(); },
+      `⭐ Pro is active until ${until.toISOString().slice(0, 10)}. ` +
+      `It renews automatically — manage or cancel anytime in ` +
+      `Telegram Settings → My Stars.`);
+    return;
+  }
+
   if (!msg.text) return;
   const text = MENU_BUTTONS[msg.text.trim()] || msg.text.trim();
   const [rawCmd, ...rest] = text.split(/\s+/);
@@ -303,6 +331,36 @@ async function handleMessage(msg, env) {
 
     case "/id":
       return reply(env, chatId, `Your id: ${msg.from.id}`);
+
+    case "/pro":
+    case "/upgrade": {
+      const { config } = await loadConfig(env);
+      const u = config.users?.[String(chatId)];
+      if (isAdmin || (config.whitelist || []).includes(String(chatId))) {
+        return reply(env, chatId, "You already have Pro (courtesy of the house 🎩)");
+      }
+      if (hasPaidPro(u)) {
+        return reply(env, chatId,
+          `You're already Pro until ${u.paid_until.slice(0, 10)} ⭐`);
+      }
+      const price = Number(env.PRO_PRICE_STARS || 550);
+      const res = await tg(env, "sendInvoice", {
+        chat_id: chatId,
+        title: "XDigest Pro",
+        description:
+          "Up to 6 digest times per day and 25 watched accounts. " +
+          "Renews monthly, cancel anytime in Telegram settings.",
+        payload: "pro-sub",
+        currency: "XTR",
+        prices: [{ label: "XDigest Pro, 30 days", amount: price }],
+        subscription_period: 2592000,
+      });
+      if (!res.ok) {
+        return reply(env, chatId,
+          `Couldn't create the invoice: ${esc(res.description || "unknown error")}`);
+      }
+      return;
+    }
 
     case "/channel": {
       if (!/^@[a-zA-Z0-9_]{4,}$/.test(arg) && !/^-100\d+$/.test(arg)) {
@@ -327,7 +385,8 @@ async function handleMessage(msg, env) {
       const merged = [...new Set([...current, ...handles])];
       if (merged.length > max) {
         return reply(env, chatId,
-          `Your plan includes up to ${max} accounts (you'd have ${merged.length}).`);
+          `Your plan includes up to ${max} accounts (you'd have ${merged.length}). ` +
+          `Pro gives you ${LIMITS.pro.sources} — /pro`);
       }
       return setField(env, chatId, (u) => {
         u.sources = [...new Set([...u.sources, ...handles])].slice(0, max);
@@ -362,7 +421,9 @@ async function handleMessage(msg, env) {
       const { config } = await loadConfig(env);
       const max = limitsFor(config, chatId, isAdmin).hours;
       if (hours.length > max) {
-        return reply(env, chatId, `Your plan includes up to ${max} digest time(s) per day.`);
+        return reply(env, chatId,
+          `Your plan includes up to ${max} digest time(s) per day. ` +
+          `Pro gives you ${LIMITS.pro.hours} — /pro`);
       }
       const u0 = config.users?.[String(chatId)];
       return setField(env, chatId, (u) => { u.hours = hours; },
@@ -407,7 +468,8 @@ async function handleMessage(msg, env) {
     case "/settings": {
       const { config } = await loadConfig(env);
       const u = config.users[String(chatId)] || userDefaults();
-      const pro = isAdmin || (config.whitelist || []).includes(String(chatId));
+      const paid = hasPaidPro(u);
+      const pro = isAdmin || paid || (config.whitelist || []).includes(String(chatId));
       const langNames = { en: "English", uk: "Ukrainian", ru: "Russian" };
       const lines = [
         "⚙️ <b>Your setup</b>",
@@ -419,7 +481,9 @@ async function handleMessage(msg, env) {
         `🌐 Language: ${langNames[u.language || "en"]}`,
         `✍️ Style: ${u.style ? esc(u.style) : "default"}`,
         `🔢 Posts per digest: ${u.limit}`,
-        pro ? "⭐ Plan: pro" : "🆓 Plan: free",
+        pro
+          ? (paid ? `⭐ Plan: Pro until ${u.paid_until.slice(0, 10)}` : "⭐ Plan: Pro")
+          : "🆓 Plan: free — upgrade with /pro",
       ];
       return reply(env, chatId, lines.join("\n"));
     }
