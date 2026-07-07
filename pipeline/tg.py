@@ -23,7 +23,7 @@ def call(method: str, files=None, **params):
 def send_preview(chat_id: int, media: list[tuple[str, str]], caption: str) -> list[dict]:
     """Send the content message(s) a user will approve. Returns the Messages."""
     if not media:
-        msg = call("sendMessage", chat_id=chat_id, text=caption[:4096])
+        msg = call("sendMessage", chat_id=chat_id, text=caption[:4096], parse_mode="HTML")
         return [msg]
 
     if len(media) == 1:
@@ -31,7 +31,7 @@ def send_preview(chat_id: int, media: list[tuple[str, str]], caption: str) -> li
         method = "sendPhoto" if kind == "photo" else "sendVideo"
         with open(path, "rb") as fh:
             msg = call(method, files={kind: fh},
-                       chat_id=chat_id, caption=caption[:1024])
+                       chat_id=chat_id, caption=caption[:1024], parse_mode="HTML")
         return [msg]
 
     handles, input_media = [], []
@@ -42,6 +42,7 @@ def send_preview(chat_id: int, media: list[tuple[str, str]], caption: str) -> li
             item = {"type": kind, "media": f"attach://m{i}"}
             if i == 0:
                 item["caption"] = caption[:1024]
+                item["parse_mode"] = "HTML"
             input_media.append(item)
         msgs = call(
             "sendMediaGroup",

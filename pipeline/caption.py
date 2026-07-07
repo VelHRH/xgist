@@ -2,10 +2,38 @@
 
 import logging
 import os
+import re
 
 from .config import CLAUDE_MODEL
 
 log = logging.getLogger(__name__)
+
+# Matches «...» or "..." or "..." with at least 15 chars inside.
+# Guillemets dominate RU/UK text; curly/straight double quotes cover EN.
+_QUOTE_RE = re.compile(r'[«“"](.{15,}?)[»”"]', re.DOTALL)
+
+
+def _escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def format_caption(text: str) -> str:
+    """Wrap quoted passages in <blockquote> tags and split into paragraphs.
+
+    Returns HTML-escaped text safe for Telegram's parse_mode=HTML.
+    """
+    parts: list[str] = []
+    last_end = 0
+    for m in _QUOTE_RE.finditer(text):
+        before = text[last_end:m.start()].rstrip(":— \n")
+        if before.strip():
+            parts.append(_escape(before.strip()))
+        parts.append(f"<blockquote>{_escape(m.group(1).strip())}</blockquote>")
+        last_end = m.end()
+    after = text[last_end:].lstrip(".,!? \n").strip()
+    if after:
+        parts.append(_escape(after))
+    return "\n\n".join(p for p in parts if p)
 
 
 LANGUAGES = {"en": "English", "uk": "Ukrainian", "ru": "Russian"}
@@ -14,12 +42,12 @@ LANGUAGES = {"en": "English", "uk": "Ukrainian", "ru": "Russian"}
 def make_caption(tweet: dict, user: dict) -> str:
     fallback = tweet["text"][:900].strip()
     if not tweet["text"] or not os.getenv("ANTHROPIC_API_KEY"):
-        return fallback
+        return format_caption(fallback)
     try:
-        return _claude_caption(tweet, user)
+        return format_caption(_claude_caption(tweet, user))
     except Exception:
         log.exception("caption generation failed, using raw tweet text")
-        return fallback
+        return format_caption(fallback)
 
 
 def _claude_caption(tweet: dict, user: dict) -> str:
