@@ -38,6 +38,11 @@ def load_state() -> dict:
     return _load_json(STATE_FILE, {"users": {}}).get("users", {})
 
 
+def load_feedback() -> dict:
+    """Approve/skip history written by the Worker (feedback.json)."""
+    return _load_json(ROOT / "feedback.json", {"users": {}}).get("users", {})
+
+
 def save_state(users_state: dict) -> None:
     STATE_FILE.write_text(
         json.dumps({"users": users_state}, indent=2, ensure_ascii=False) + "\n",

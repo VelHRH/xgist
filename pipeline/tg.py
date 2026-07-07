@@ -57,9 +57,10 @@ def send_preview(chat_id: int, media: list[tuple[str, str]], caption: str) -> li
 
 def send_controls(chat_id: int, content_ids: list[int], label: str) -> None:
     """Send the approve/skip buttons referencing the content message ids."""
+    ids = ",".join(map(str, content_ids))
     keyboard = {"inline_keyboard": [[
-        {"text": "✅ Post", "callback_data": "p:" + ",".join(map(str, content_ids))},
-        {"text": "❌ Skip", "callback_data": "s"},
+        {"text": "✅ Post", "callback_data": f"p:{ids}"},
+        {"text": "❌ Skip", "callback_data": f"s:{ids}"},
     ]]}
     call("sendMessage", chat_id=chat_id, text=label[:4096],
          parse_mode="HTML",

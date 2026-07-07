@@ -69,6 +69,7 @@ def _parse_dir(dest, handle: str) -> list[dict]:
             "date": _parse_date(meta.get("date")),
             "favorites": int(meta.get("favorite_count") or 0),
             "retweets": int(meta.get("retweet_count") or 0),
+            "replies": int(meta.get("reply_count") or 0),
             "media": [],
         })
         media_path = meta_path.with_suffix("")  # strips the trailing .json

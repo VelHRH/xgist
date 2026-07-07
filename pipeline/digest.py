@@ -8,15 +8,16 @@ import logging
 import os
 import shutil
 from datetime import datetime, timedelta, timezone
+from statistics import median
 from zoneinfo import ZoneInfo
 
 from . import tg
 from .caption import make_caption
-from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, TMP_DIR, load_state,
-                     load_users, save_state)
+from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, TMP_DIR, load_feedback,
+                     load_state, load_users, save_state)
 from .fetch import fetch_source
 from .media import prepare
-from .rank import pick_top
+from .rank import engagement, pick_top
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +77,16 @@ def main() -> None:
     log.info("fetching %d sources for %d users", len(sources), len(due))
     fetched = {s: fetch_source(s) for s in sources}
 
+    # Each account's typical engagement (median over its fetched sample) —
+    # lets a small account's hit compete with a big account's routine post.
+    for tweets in fetched.values():
+        if tweets:
+            baseline = median(engagement(t) for t in tweets)
+            for t in tweets:
+                t["baseline"] = baseline
+
+    feedback = load_feedback()
+
     for uid, cfg in due.items():
         user_state = state.setdefault(uid, {})
         start = _window_start(user_state, now)
@@ -86,7 +97,8 @@ def main() -> None:
         log.info("user %s: %d candidates since %s", uid, len(candidates), start)
 
         sent = 0
-        for tweet in pick_top(candidates, cfg):
+        ranking_cfg = {**cfg, "_feedback": feedback.get(uid, [])}
+        for tweet in pick_top(candidates, ranking_cfg):
             try:
                 media = prepare(tweet["media"])
                 if not media and not tweet["text"]:
@@ -101,6 +113,15 @@ def main() -> None:
                     f" · ❤️ {tweet['favorites']} · 🔁 {tweet['retweets']}"
                     f"\nPublish to {dest}?",
                 )
+                # Remember what this preview was about so the Worker can log
+                # the user's ✅/❌ verdict for future ranking.
+                pending = user_state.setdefault("pending", {})
+                pending[str(content_ids[0])] = {
+                    "source": tweet["source"],
+                    "text": tweet["text"][:280],
+                }
+                while len(pending) > 40:
+                    pending.pop(next(iter(pending)))
                 sent += 1
             except Exception:
                 log.exception("failed to preview tweet %s for user %s", tweet["id"], uid)

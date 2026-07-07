@@ -46,8 +46,8 @@ Fine-tuning:
 const ADMIN_HELP = `
 
 Admin:
-/whitelist <id> — give a user pro limits for free
-/unwhitelist <id> — revoke
+/whitelist 123456789 — give a user pro limits for free (id from their /id)
+/unwhitelist 123456789 — revoke
 /whitelisted — list whitelisted ids
 /users — list all registered users
 /gen_digest_now — run your digest immediately (testing)`;
@@ -117,13 +117,21 @@ async function tg(env, method, params) {
 }
 
 // All bot replies use HTML parse mode; escape any user-provided text with esc().
-const reply = (env, chatId, text, extra = {}) => tg(env, "sendMessage", {
-  chat_id: chatId,
-  text,
-  parse_mode: "HTML",
-  link_preview_options: { is_disabled: true },
-  ...extra,
-});
+// If Telegram rejects the HTML (stray < or &), fall back to plain text rather
+// than silently sending nothing.
+async function reply(env, chatId, text, extra = {}) {
+  const params = {
+    chat_id: chatId,
+    text,
+    link_preview_options: { is_disabled: true },
+    ...extra,
+  };
+  const res = await tg(env, "sendMessage", { ...params, parse_mode: "HTML" });
+  if (!res.ok && /parse/i.test(res.description || "")) {
+    return tg(env, "sendMessage", params);
+  }
+  return res;
+}
 
 // Persistent menu keyboard; button taps are mapped back to commands below.
 const MENU = {
@@ -203,30 +211,61 @@ function b64decode(b64) {
   return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
 }
 
-async function loadConfig(env) {
+async function ghGetJson(env, path) {
   const resp = await fetch(
-    `https://api.github.com/repos/${env.GH_REPO}/contents/users.json`,
+    `https://api.github.com/repos/${env.GH_REPO}/contents/${path}`,
     { headers: ghHeaders(env) },
   );
-  if (!resp.ok) throw new Error(`config load failed: ${resp.status}`);
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw new Error(`${path} load failed: ${resp.status}`);
   const file = await resp.json();
-  return { config: JSON.parse(b64decode(file.content)), sha: file.sha };
+  return { data: JSON.parse(b64decode(file.content)), sha: file.sha };
+}
+
+async function ghPutJson(env, path, data, sha) {
+  const body = {
+    message: `bot: update ${path}`,
+    content: b64encode(JSON.stringify(data, null, 2) + "\n"),
+  };
+  if (sha) body.sha = sha;
+  const resp = await fetch(
+    `https://api.github.com/repos/${env.GH_REPO}/contents/${path}`,
+    { method: "PUT", headers: ghHeaders(env), body: JSON.stringify(body) },
+  );
+  return resp.ok;
+}
+
+async function loadConfig(env) {
+  const file = await ghGetJson(env, "users.json");
+  if (!file) throw new Error("users.json missing");
+  return { config: file.data, sha: file.sha };
 }
 
 async function saveConfig(env, config, sha) {
-  const resp = await fetch(
-    `https://api.github.com/repos/${env.GH_REPO}/contents/users.json`,
-    {
-      method: "PUT",
-      headers: ghHeaders(env),
-      body: JSON.stringify({
-        message: "bot: update user config",
-        content: b64encode(JSON.stringify(config, null, 2) + "\n"),
-        sha,
-      }),
-    },
-  );
-  if (!resp.ok) throw new Error(`config save failed: ${resp.status}`);
+  if (!(await ghPutJson(env, "users.json", config, sha))) {
+    throw new Error("config save failed");
+  }
+}
+
+/** Log a ✅/❌ verdict so the ranking model learns the owner's taste. */
+async function recordFeedback(env, chatId, idsStr, verdict) {
+  if (!idsStr) return; // previews sent by older versions carry no ids on Skip
+  const firstId = idsStr.split(",")[0];
+  try {
+    const st = await ghGetJson(env, "state.json");
+    const pending = st?.data?.users?.[String(chatId)]?.pending?.[firstId];
+    if (!pending) return;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const fb = await ghGetJson(env, "feedback.json");
+      const data = fb?.data || { users: {} };
+      const list = (data.users[String(chatId)] ||= []);
+      list.push({ verdict, source: pending.source, text: pending.text });
+      while (list.length > 30) list.shift();
+      if (await ghPutJson(env, "feedback.json", data, fb?.sha)) return;
+    }
+  } catch (err) {
+    console.log("feedback record failed:", err);
+  }
 }
 
 /* ---------------- Commands ---------------- */
@@ -390,7 +429,7 @@ async function handleMessage(msg, env) {
       if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
       if (!/^\d+$/.test(arg)) {
         return reply(env, chatId,
-          `Usage: ${cmd} <numeric id>\n(the user can get theirs with /id)`);
+          `Usage: ${cmd} 123456789\n(the user can get their numeric id with /id)`);
       }
       const adding = cmd === "/whitelist";
       return mutateConfig(env, chatId, (config) => {
@@ -487,9 +526,10 @@ async function handleCallback(cb, env) {
   const answer = (text, alert = false) =>
     tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert });
 
-  if (cb.data === "s") {
+  if (cb.data === "s" || cb.data.startsWith("s:")) {
     await tg(env, "editMessageText",
       { chat_id: chatId, message_id: controlId, text: "❌ Skipped" });
+    await recordFeedback(env, chatId, cb.data.slice(2), "skipped");
     return answer("Skipped");
   }
 
@@ -512,6 +552,7 @@ async function handleCallback(cb, env) {
     const dest = typeof user.channel === "string" ? user.channel : "your channel";
     await tg(env, "editMessageText",
       { chat_id: chatId, message_id: controlId, text: `✅ Posted to ${dest}` });
+    await recordFeedback(env, chatId, cb.data.slice(2), "approved");
     return answer("Posted!");
   }
 
