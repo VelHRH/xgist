@@ -54,7 +54,9 @@ async def _get_api() -> twscrape.API:
             email_password="",
             cookies=cookie_str,
         )
-        # Cookies already contain a valid session — no login call needed.
+        # login_all activates the account via cookie verification (not the
+        # login form), so it works even from GitHub Actions IPs.
+        await api.pool.login_all()
     else:
         password = os.environ.get("TWITTER_PASSWORD", "")
         email = os.environ.get("TWITTER_EMAIL", "")
