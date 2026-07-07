@@ -21,7 +21,7 @@
  * POST requests are the Telegram webhook.
  */
 
-const HELP = `🤖 XDigest — the best of X, straight to your Telegram channel
+const HELP = `🤖 XGist — the gist of X, straight to your Telegram channel
 
 Setup — 3 steps:
 
@@ -75,7 +75,7 @@ function hasPaidPro(user) {
 
 // Early-access gift: the first PROMO_SLOTS users to /start get a free month
 // of Pro. Grant ids are tracked in config.promo so slots are never reused.
-const PROMO_SLOTS = 10;
+const PROMO_SLOTS = 50;
 
 async function maybeGrantPromo(env, chatId) {
   const id = String(chatId);
@@ -430,13 +430,13 @@ async function handleMessage(msg, env) {
       // Subscription invoices can only be created as links (sendInvoice with
       // subscription_period fails with SUBSCRIPTION_EXPORT_MISSING).
       const res = await tg(env, "createInvoiceLink", {
-        title: "XDigest Pro",
+        title: "XGist Pro",
         description:
           "Up to 6 digest times per day and 25 watched accounts. " +
           "Renews monthly, cancel anytime in Telegram settings.",
         payload: "pro-sub",
         currency: "XTR",
-        prices: [{ label: "XDigest Pro, 30 days", amount: price }],
+        prices: [{ label: "XGist Pro, 30 days", amount: price }],
         subscription_period: 2592000,
       });
       if (!res.ok) {
@@ -444,7 +444,7 @@ async function handleMessage(msg, env) {
           `Couldn't create the invoice: ${esc(res.description || "unknown error")}`);
       }
       return reply(env, chatId,
-        `⭐ <b>XDigest Pro</b> — ${price} Stars / month\n` +
+        `⭐ <b>XGist Pro</b> — ${price} Stars / month\n` +
         `6 digest times a day · 25 watched accounts\n` +
         `Renews automatically; cancel anytime in Telegram Settings → My Stars.`,
         { reply_markup: { inline_keyboard: [[
@@ -808,22 +808,23 @@ async function serveSite(request, env) {
 
 function landingHTML(origin, botUser) {
   const botLink = botUser ? `https://t.me/${botUser}` : "#";
-  const title = "XDigest — auto-post the best tweets to your Telegram channel";
+  const title = "XGist — the best of X (Twitter), distilled to your Telegram channel";
   const description =
-    "Telegram bot that watches X (Twitter) accounts, picks the most interesting " +
-    "posts with AI and publishes them to your channel in one tap. Free to start.";
+    "Telegram bot that watches X (Twitter) accounts, extracts the posts worth reading " +
+    "with AI, and publishes them to your channel in one tap. Save 30+ hours a month.";
 
   const faq = [
-    ["How does XDigest post to my channel?",
+    ["How does XGist post to my channel?",
      "You add the bot as an administrator of your channel with the single " +
      "permission to post messages. Nothing else is required — no passwords, no API keys."],
     ["Do I need a server or any technical setup?",
      "No. You send the bot a list of X accounts and the hours you want digests. Everything else is automatic."],
-    ["How does it choose which tweets to repost?",
+    ["How does it choose which posts to surface?",
      "It shortlists new posts by engagement, then an AI model ranks them against " +
-     "your stated interests and writes a caption in your channel's style. You approve every post before it goes out."],
+     "your taste — learned from every ✅ and ❌ you tap — and writes a caption in your language. You approve every post before it goes out."],
     ["Is it free?",
-     "The core is free while in early access. Higher digest frequency and more watched accounts will be paid plans."],
+     "The core is free. First 100 users get a full Pro month automatically — no card needed. " +
+     "Pro unlocks more watched accounts and more digest times per day."],
   ];
 
   const jsonLd = {
@@ -831,7 +832,7 @@ function landingHTML(origin, botUser) {
     "@graph": [
       {
         "@type": "SoftwareApplication",
-        name: "XDigest",
+        name: "XGist",
         applicationCategory: "UtilitiesApplication",
         operatingSystem: "Telegram",
         url: origin + "/",
@@ -918,25 +919,26 @@ function landingHTML(origin, botUser) {
 <body>
 <main>
   <span class="badge">Telegram bot · free early access</span>
-  <h1>Your Telegram channel, fed by the <em>best</em> of X — automatically</h1>
-  <p class="lead">XDigest watches the X (Twitter) accounts you choose, picks the
-  posts worth reposting and sends them to you at the hours you set. One tap —
-  published to your channel, media and caption included.</p>
-  <a class="cta" href="${botLink}">Open the bot in Telegram →</a>
-  <p class="hint">No passwords, no API keys — you approve every post.</p>
+  <h1>The <em>gist</em> of X (Twitter) — delivered to your Telegram channel</h1>
+  <p class="lead">XGist watches the X accounts you choose, distills the posts
+  worth reading with AI, and sends you digests at the hours you set.
+  One tap — published to your channel, media and caption included.
+  Save 30+ hours a month.</p>
+  <a class="cta" href="${botLink}">Open XGist in Telegram →</a>
+  <p class="hint">First 100 users get Pro free for a month — no card needed.</p>
 
   <h2>How it works</h2>
   <ol class="steps">
     <li>Tell the bot which X accounts to watch: <code>/add naval pmarca</code></li>
-    <li>Set your digest hours: <code>/times 9,18</code></li>
+    <li>Set your digest hours: <code>/schedule 9,18</code></li>
     <li>Add the bot as admin of your channel</li>
-    <li>Get previews, tap ✅ — the post is in your channel in a second</li>
+    <li>Get digests, tap ✅ — the post is in your channel in a second</li>
   </ol>
 
   <h2>Why channel admins use it</h2>
   <ul class="features">
-    <li>AI curation — it ranks new posts by engagement <em>and</em> your interests, not just recency</li>
-    <li>Captions written in your channel's own style and language</li>
+    <li>AI curation — ranks posts by engagement <em>and</em> your taste, learned from every ✅ and ❌</li>
+    <li>Captions written in your channel's language and style</li>
     <li>You approve everything — nothing is ever posted without your tap</li>
     <li>Photos and videos come through natively, not as screenshots</li>
     <li>No passwords, no API keys, no server — a two-minute setup</li>
@@ -945,7 +947,7 @@ function landingHTML(origin, botUser) {
   <h2>Questions</h2>
   ${faqHTML}
 
-  <footer>XDigest · <a href="${botLink}">@${botUser || "the bot"}</a> ·
+  <footer>XGist · <a href="${botLink}">@${botUser || "the bot"}</a> ·
   posts only what you approve</footer>
 </main>
 </body>
