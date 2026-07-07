@@ -3,9 +3,9 @@
 import asyncio
 import logging
 import os
-import urllib.request
 from pathlib import Path
 
+import requests
 import twscrape
 
 from .config import FETCH_RANGE, TMP_DIR
@@ -13,7 +13,8 @@ from .config import FETCH_RANGE, TMP_DIR
 log = logging.getLogger(__name__)
 
 _DB = Path("accounts.db")
-_api: twscrape.API | None = None  # one instance per process
+_api: twscrape.API | None = None
+_cookie_str: str = ""
 
 
 def _parse_cookies(raw: str) -> str:
@@ -37,7 +38,7 @@ def _parse_cookies(raw: str) -> str:
 
 
 async def _get_api() -> twscrape.API:
-    global _api
+    global _api, _cookie_str
     if _api is not None:
         return _api
 
@@ -46,13 +47,13 @@ async def _get_api() -> twscrape.API:
     username = os.environ.get("TWITTER_USERNAME", "xgist")
 
     if cookies_raw:
-        cookie_str = _parse_cookies(cookies_raw)
+        _cookie_str = _parse_cookies(cookies_raw)
         await api.pool.add_account(
             username=username,
             password="n/a",
             email="n/a",
             email_password="",
-            cookies=cookie_str,
+            cookies=_cookie_str,
         )
         # login_all activates the account via cookie verification (not the
         # login form), so it works even from GitHub Actions IPs.
@@ -76,12 +77,23 @@ def _best_video_url(video: twscrape.MediaVideo) -> str:
     return variants[0].url if variants else ""
 
 
-def _download_media(tweet_id: str, media: twscrape.Media, dest: Path) -> list[str]:
+_DL_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Referer": "https://x.com/",
+}
+
+
+def _download_media(tweet_id: str, media: twscrape.Media, dest: Path,
+                    cookie_str: str = "") -> list[str]:
+    headers = dict(_DL_HEADERS)
+    if cookie_str:
+        headers["Cookie"] = cookie_str
+
     items: list[tuple[str, str]] = []
     for i, photo in enumerate(media.photos):
-        url = photo.url.split("?")[0]
-        ext = Path(url).suffix or ".jpg"
-        items.append((photo.url, f"photo_{i}{ext}"))
+        url = photo.url.split("?")[0] + "?format=jpg&name=large"
+        items.append((url, f"photo_{i}.jpg"))
     for i, video in enumerate(media.videos):
         url = _best_video_url(video)
         if url:
@@ -91,7 +103,9 @@ def _download_media(tweet_id: str, media: twscrape.Media, dest: Path) -> list[st
     for url, name in items[:4]:
         out = dest / f"{tweet_id}_{name}"
         try:
-            urllib.request.urlretrieve(url, out)  # noqa: S310
+            r = requests.get(url, headers=headers, timeout=60)
+            r.raise_for_status()
+            out.write_bytes(r.content)
             paths.append(str(out))
         except Exception as exc:
             log.warning("failed to download %s: %s", url, exc)
@@ -124,7 +138,7 @@ async def _fetch_async(handle: str) -> list[dict]:
         async for tw in api.user_tweets(user.id, limit=FETCH_RANGE):
             if tw.retweetedTweet is not None:
                 continue
-            media_paths = _download_media(tw.id_str, tw.media, dest) if tw.media else []
+            media_paths = _download_media(tw.id_str, tw.media, dest, _cookie_str) if tw.media else []
             tweets.append({
                 "id": tw.id_str,
                 "source": handle,
