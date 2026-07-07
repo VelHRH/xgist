@@ -142,6 +142,26 @@ export default {
     }
     return new Response("ok"); // always 200 so Telegram doesn't retry-storm
   },
+
+  // Cloudflare Cron Trigger (Worker → Settings → Triggers → add "0 * * * *").
+  // GitHub's own schedule silently drops hourly slots, so the Worker kicks
+  // each run via workflow_dispatch — those execute promptly and reliably.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      fetch(
+        `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/digest.yml/dispatches`,
+        {
+          method: "POST",
+          headers: ghHeaders(env),
+          body: JSON.stringify({ ref: "main", inputs: {} }),
+        },
+      ).then(async (resp) => {
+        if (resp.status !== 204) {
+          console.log("cron dispatch failed:", resp.status, await resp.text());
+        }
+      }),
+    );
+  },
 };
 
 /* ---------------- Telegram helpers ---------------- */

@@ -22,21 +22,31 @@ from .rank import engagement, pick_top
 log = logging.getLogger(__name__)
 
 
-def _is_due(cfg: dict, user_state: dict, now: datetime) -> bool:
+# GitHub's hourly cron fires late or skips slots entirely, so a scheduled
+# hour still counts as due for this long after it passed (if not yet served).
+CATCH_UP_HOURS = 2
+
+
+def _due_slot(cfg: dict, user_state: dict, now: datetime) -> str | None:
+    """Return the "YYYY-MM-DD HH" slot this run should serve, or None."""
     if not cfg.get("channel") or not cfg.get("sources"):
-        return False
-    if os.getenv("FORCE_ALL"):
-        return True
+        return None
     try:
         tz = ZoneInfo(cfg.get("timezone") or DEFAULT_TZ)
     except Exception:
         tz = ZoneInfo(DEFAULT_TZ)
     local = now.astimezone(tz)
-    if local.hour not in (cfg.get("hours") or [9]):
-        return False
-    # Guard against double runs within the same local hour.
-    last_run = user_state.get("last_run_hour")
-    return last_run != local.strftime("%Y-%m-%d %H")
+    if os.getenv("FORCE_ALL"):
+        return local.strftime("%Y-%m-%d %H")
+    hours = cfg.get("hours") or [9]
+    served = user_state.get("last_run_hour") or ""
+    for back in range(CATCH_UP_HOURS + 1):
+        slot = local - timedelta(hours=back)
+        if slot.hour in hours:
+            key = slot.strftime("%Y-%m-%d %H")
+            if key > served:
+                return key
+    return None
 
 
 # Mirrors LIMITS in worker/worker.js — keep the two in sync.
@@ -90,8 +100,9 @@ def main() -> None:
             log.error("FORCE_USER %s is not a registered user", force_user)
             return
     else:
-        due = {uid: cfg for uid, cfg in users.items()
-               if _is_due(cfg, state.get(uid, {}), now)}
+        slots = {uid: _due_slot(cfg, state.get(uid, {}), now)
+                 for uid, cfg in users.items()}
+        due = {uid: cfg for uid, cfg in users.items() if slots[uid]}
     if not due:
         log.info("no users due at %s UTC", now.strftime("%H:%M"))
         return
@@ -164,7 +175,11 @@ def main() -> None:
                 log.exception("failed to notify user %s", uid)
 
         tz = ZoneInfo(cfg.get("timezone") or DEFAULT_TZ)
-        user_state["last_run_hour"] = now.astimezone(tz).strftime("%Y-%m-%d %H")
+        # Record the *slot* served (not the wall-clock hour), so a late run
+        # that catches up a missed hour doesn't block the next scheduled one.
+        user_state["last_run_hour"] = (
+            slots.get(uid) if not force_user else None
+        ) or now.astimezone(tz).strftime("%Y-%m-%d %H")
         user_state["last_digest_at"] = now.isoformat()
 
     save_state(state)

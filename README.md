@@ -94,7 +94,11 @@ The Worker needs to read/write `users.json` in your repo.
    - `ADMIN_ID` (recommended) — your numeric Telegram id; send `/id` to the
      bot once it's live, then add this. Usernames can be released and
      re-claimed by strangers; the numeric id is the tamper-proof check.
-4. Copy the worker URL (like `https://xdigest.YOURNAME.workers.dev`).
+4. Worker → Settings → **Triggers** → Cron Triggers → add `0 * * * *`.
+   This makes the Worker start the hourly digest run — Cloudflare's cron is
+   punctual, while GitHub's own scheduler silently skips slots (the schedule
+   in `digest.yml` is kept only as a fallback).
+5. Copy the worker URL (like `https://xdigest.YOURNAME.workers.dev`).
 
 The worker URL doubles as your **landing page**: opening it in a browser shows
 a SEO-ready product page (with `robots.txt` and `sitemap.xml`), while Telegram

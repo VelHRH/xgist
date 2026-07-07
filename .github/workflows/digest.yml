@@ -2,7 +2,11 @@ name: Digest
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour; digest.py decides which users are due
+    # Fallback only — the Cloudflare Worker cron (hourly) is the primary
+    # trigger via workflow_dispatch, because GitHub's scheduler silently
+    # drops slots. Every 2h at :37 + the 2h catch-up in digest.py still
+    # covers every scheduled hour if the Worker cron ever fails.
+    - cron: "37 */2 * * *"
   workflow_dispatch:
     inputs:
       force:
