@@ -28,9 +28,9 @@ Setup — 3 steps:
 1️⃣ /channel @yourchannel — connect your channel
 (first add me as its admin with the "Post messages" permission; private channel? just forward me any message from it)
 
-2️⃣ /add @naval @pmarca — X (Twitter) accounts to watch
+2️⃣ /add @naval @pmarca — X (Twitter) accounts to watch (up to 5 free · 25 with Pro)
 
-3️⃣ /schedule 9,18 — hours (0-23) when I bring you a digest
+3️⃣ /schedule 9,18 — hours (0-23) when I bring you a digest (1 time/day free · 6 with Pro)
 
 At those hours you'll get previews here. Tap ✅ Post — it's in your channel. Tap ❌ Skip — nobody ever sees it.
 
@@ -43,7 +43,8 @@ Fine-tuning:
 🌍 /timezone Europe/Kyiv — your timezone
 ⚙️ /settings — your current setup
 🆔 /id — your Telegram id
-⭐ /pro — up to 6 digests/day and 25 accounts`;
+⭐ /pro — up to 6 digests/day and 25 accounts
+📮 /feedback — tell the maker anything`;
 
 const ADMIN_HELP = `
 
@@ -70,6 +71,32 @@ function isAdminUser(from, env) {
 
 function hasPaidPro(user) {
   return !!(user?.paid_until && Date.parse(user.paid_until) > Date.now());
+}
+
+// Early-access gift: the first PROMO_SLOTS users to /start get a free month
+// of Pro. Grant ids are tracked in config.promo so slots are never reused.
+const PROMO_SLOTS = 10;
+
+async function maybeGrantPromo(env, chatId) {
+  const id = String(chatId);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { config, sha } = await loadConfig(env);
+    config.users ||= {};
+    const promo = (config.promo ||= []);
+    const user = config.users[id];
+    if (promo.includes(id) || promo.length >= PROMO_SLOTS) return false;
+    if ((config.whitelist || []).includes(id) || hasPaidPro(user)) return false;
+    const entry = (config.users[id] ||= userDefaults());
+    entry.paid_until = new Date(Date.now() + 30 * 86400 * 1000).toISOString();
+    promo.push(id);
+    try {
+      await saveConfig(env, config, sha);
+      return true;
+    } catch (err) {
+      if (attempt === 1) console.log("promo grant failed:", err);
+    }
+  }
+  return false;
 }
 
 function limitsFor(config, chatId, isAdmin) {
@@ -175,6 +202,7 @@ const COMMANDS = [
   ["timezone", "e.g. Europe/Kyiv"],
   ["settings", "your current setup"],
   ["pro", "upgrade to Pro ⭐"],
+  ["feedback", "message the maker"],
   ["help", "how it all works"],
 ];
 const ADMIN_COMMANDS = [
@@ -334,9 +362,35 @@ async function handleMessage(msg, env) {
 
   switch (cmd) {
     case "/start":
-    case "/help":
-      return reply(env, chatId, HELP + (isAdmin ? ADMIN_HELP : ""),
+    case "/help": {
+      await reply(env, chatId, HELP + (isAdmin ? ADMIN_HELP : ""),
         { reply_markup: MENU });
+      if (cmd === "/start" && !isAdmin && await maybeGrantPromo(env, chatId)) {
+        await reply(env, chatId,
+          "🎁 You're one of our first users — Pro is free for your first month! " +
+          "6 digest times a day, 25 accounts. Tell us what to improve: /feedback");
+        if (env.ADMIN_ID) {
+          await reply(env, Number(env.ADMIN_ID),
+            `🎁 Promo slot used by id ${chatId}` +
+            (msg.from.username ? ` (@${esc(msg.from.username)})` : ""));
+        }
+      }
+      return;
+    }
+
+    case "/feedback": {
+      if (!arg) {
+        return reply(env, chatId,
+          "Usage: /feedback your message — goes straight to the maker");
+      }
+      if (env.ADMIN_ID) {
+        const who = msg.from.username
+          ? `@${esc(msg.from.username)}` : esc(msg.from.first_name || "user");
+        await reply(env, Number(env.ADMIN_ID),
+          `📮 Feedback from ${who} (id ${chatId}):\n${esc(arg)}`);
+      }
+      return reply(env, chatId, "📮 Thanks! Passed straight to the maker.");
+    }
 
     case "/id":
       return reply(env, chatId, `Your id: ${msg.from.id}`);
