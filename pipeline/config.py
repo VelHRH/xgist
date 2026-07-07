@@ -5,7 +5,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 USERS_FILE = ROOT / "users.json"
 STATE_FILE = ROOT / "state.json"
-COOKIES_FILE = ROOT / "cookies.txt"
 TMP_DIR = ROOT / "tmp"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
