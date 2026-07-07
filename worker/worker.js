@@ -935,6 +935,12 @@ function landingHTML(origin, botUser) {
     <li>Get digests, tap ✅ — the post is in your channel in a second</li>
   </ol>
 
+  <h2>Seen in the wild</h2>
+  <p style="color:var(--muted);margin-bottom:8px">
+    <a href="https://t.me/aidistilled" target="_blank" rel="noopener">@aidistilled</a>
+    — daily AI news from X, curated and posted entirely with XGist.
+  </p>
+
   <h2>Why channel admins use it</h2>
   <ul class="features">
     <li>AI curation — ranks posts by engagement <em>and</em> your taste, learned from every ✅ and ❌</li>
