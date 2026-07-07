@@ -15,11 +15,33 @@ from . import tg
 from .caption import make_caption
 from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, TMP_DIR, load_feedback,
                      load_state, load_users, load_whitelist, save_state)
-from .fetch import fetch_source
+from .fetch import AuthError, fetch_source
 from .media import prepare
 from .rank import engagement, pick_top
 
 log = logging.getLogger(__name__)
+
+
+def _alert_cookie_expiry() -> None:
+    import json
+    import urllib.request
+    admin_id = os.getenv("ADMIN_ID", "").strip()
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    log.warning("X session invalid — cookies likely expired")
+    if not (admin_id and token):
+        return
+    try:
+        urllib.request.urlopen(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=json.dumps({"chat_id": admin_id, "text": (
+                "⚠️ XGist: X cookies expired — digests paused.\n\n"
+                "Re-export cookies.txt from your browser and update "
+                "TWITTER_COOKIES in GitHub Secrets."
+            )}).encode(),
+            timeout=10,
+        )
+    except Exception as exc:
+        log.error("failed to send cookie-expiry alert: %s", exc)
 
 
 # GitHub's hourly cron fires late or skips slots entirely, so a scheduled
@@ -113,7 +135,14 @@ def main() -> None:
     # Fetch each unique source once, no matter how many users watch it.
     sources = sorted({s for cfg in due.values() for s in cfg["sources"]})
     log.info("fetching %d sources for %d users", len(sources), len(due))
-    fetched = {s: fetch_source(s) for s in sources}
+    fetched: dict[str, list] = {}
+    for s in sources:
+        try:
+            fetched[s] = fetch_source(s)
+        except AuthError:
+            _alert_cookie_expiry()
+            return
+        fetched.setdefault(s, [])
 
     # Each account's typical engagement (median over its fetched sample) —
     # lets a small account's hit compete with a big account's routine post.

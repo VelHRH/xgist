@@ -49,9 +49,9 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TWITTER_COOKIES: ${{ secrets.TWITTER_COOKIES }}
           TWITTER_USERNAME: ${{ secrets.TWITTER_USERNAME }}
-          TWITTER_PASSWORD: ${{ secrets.TWITTER_PASSWORD }}
-          TWITTER_EMAIL: ${{ secrets.TWITTER_EMAIL }}
+          ADMIN_ID: ${{ vars.ADMIN_ID }}
           FORCE_ALL: ${{ inputs.force == true && '1' || '' }}
           FORCE_USER: ${{ inputs.only_user }}
           DEFAULT_TZ: ${{ vars.DEFAULT_TZ || 'Europe/Kyiv' }}
