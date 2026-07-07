@@ -313,6 +313,15 @@ async function handleMessage(msg, env) {
       `⭐ Pro is active until ${until.toISOString().slice(0, 10)}. ` +
       `It renews automatically — manage or cancel anytime in ` +
       `Telegram Settings → My Stars.`);
+    // Tell the owner about the sale.
+    if (env.ADMIN_ID && String(chatId) !== String(env.ADMIN_ID)) {
+      const who = msg.from.username
+        ? `@${esc(msg.from.username)}` : esc(msg.from.first_name || "someone");
+      await reply(env, Number(env.ADMIN_ID),
+        `💰 ${who} (id ${chatId}) paid ${sp.total_amount} Stars — ` +
+        `Pro until ${until.toISOString().slice(0, 10)}` +
+        (sp.is_recurring ? " (recurring)" : ""));
+    }
     return;
   }
 
@@ -541,9 +550,13 @@ async function handleMessage(msg, env) {
     case "/users": {
       if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
       const { config } = await loadConfig(env);
-      const lines = Object.entries(config.users || {}).map(([id, u]) =>
-        `${id} → ${u.channel || "no channel"}, ${u.sources.length} sources, ` +
-        `${(u.hours || []).length} time(s)/day`);
+      const lines = Object.entries(config.users || {}).map(([id, u]) => {
+        const plan = hasPaidPro(u)
+          ? `⭐ paid until ${u.paid_until.slice(0, 10)}`
+          : (config.whitelist || []).includes(id) ? "⭐ whitelisted" : "🆓 free";
+        return `${id} → ${esc(String(u.channel || "no channel"))}, ` +
+               `${u.sources.length} sources, ${(u.hours || []).length} time(s)/day · ${plan}`;
+      });
       return reply(env, chatId, lines.length ? lines.join("\n") : "No users yet.");
     }
 
