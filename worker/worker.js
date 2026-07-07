@@ -32,7 +32,7 @@ Setup — 3 steps:
 
 3️⃣ /schedule 9,18 — hours (0-23) when I bring you a digest (1 time/day free · 6 with Pro)
 
-At those hours you'll get previews here. Tap ✅ Post — it's in your channel. Tap ❌ Skip — nobody ever sees it.
+At those hours you'll get previews here. Tap ✅ Post — it's in your channel. Tap ❌ Skip — nobody ever sees it. Tap 🫥 Spoiler to blur the media and text before posting.
 
 Fine-tuning:
 🌐 /lang en | uk | ru — post language (default: en)
@@ -683,6 +683,56 @@ async function handleCallback(cb, env) {
   const controlId = cb.message.message_id;
   const answer = (text, alert = false) =>
     tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert });
+
+  // 🫥 toggle: re-edit the preview so media (and text) are spoiler-blurred;
+  // copyMessages then carries the blur into the channel on ✅.
+  if (cb.data.startsWith("sp1:") || cb.data.startsWith("sp0:")) {
+    const on = cb.data[2] === "1";
+    const idsStr = cb.data.slice(4);
+    const firstId = idsStr.split(",")[0];
+    let entry = null;
+    try {
+      const st = await ghGetJson(env, "state.json");
+      entry = st?.data?.users?.[String(chatId)]?.pending?.[firstId];
+    } catch (err) {
+      console.log("state load failed:", err);
+    }
+    if (!entry || (!entry.media?.length && !entry.caption)) {
+      // Either a pre-spoiler-era preview, or the digest run hasn't
+      // committed state.json yet (it lands ~a minute after the previews).
+      return answer("Preview data isn't synced yet — try again in a minute.", true);
+    }
+    const veiled = (t) => `<tg-spoiler>${esc(t)}</tg-spoiler>`;
+    if (entry.media?.length) {
+      for (let i = 0; i < entry.media.length; i++) {
+        const m = entry.media[i];
+        const im = { type: m.type, media: m.file_id, has_spoiler: on };
+        if (i === 0 && entry.caption) {
+          im.caption = on ? veiled(entry.caption) : entry.caption;
+          if (on) im.parse_mode = "HTML";
+        }
+        await tg(env, "editMessageMedia",
+          { chat_id: chatId, message_id: m.id, media: im });
+      }
+    } else {
+      await tg(env, "editMessageText", {
+        chat_id: chatId,
+        message_id: Number(firstId),
+        text: on ? veiled(entry.caption) : entry.caption,
+        ...(on ? { parse_mode: "HTML" } : {}),
+      });
+    }
+    await tg(env, "editMessageReplyMarkup", {
+      chat_id: chatId, message_id: controlId,
+      reply_markup: { inline_keyboard: [
+        [{ text: "✅ Post", callback_data: `p:${idsStr}` },
+         { text: "❌ Skip", callback_data: `s:${idsStr}` }],
+        [{ text: on ? "🫥 Remove spoiler" : "🫥 Spoiler",
+           callback_data: `${on ? "sp0" : "sp1"}:${idsStr}` }],
+      ]},
+    });
+    return answer(on ? "Spoiler on — it stays when you publish" : "Spoiler off");
+  }
 
   if (cb.data === "s" || cb.data.startsWith("s:")) {
     await tg(env, "editMessageText",

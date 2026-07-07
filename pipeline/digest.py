@@ -142,7 +142,8 @@ def main() -> None:
                 if not media and not tweet["text"]:
                     continue
                 caption = make_caption(tweet, cfg)
-                content_ids = tg.send_preview(int(uid), media, caption)
+                msgs = tg.send_preview(int(uid), media, caption)
+                content_ids = [m["message_id"] for m in msgs]
                 dest = cfg["channel"] if isinstance(cfg["channel"], str) else "your channel"
                 tg.send_controls(
                     int(uid), content_ids,
@@ -152,11 +153,15 @@ def main() -> None:
                     f"\nPublish to {dest}?",
                 )
                 # Remember what this preview was about so the Worker can log
-                # the user's ✅/❌ verdict for future ranking.
+                # the user's ✅/❌ verdict for future ranking, and re-edit the
+                # preview (media file_ids + caption) for the 🫥 spoiler toggle.
+                refs = tg.media_refs(msgs)
                 pending = user_state.setdefault("pending", {})
                 pending[str(content_ids[0])] = {
                     "source": tweet["source"],
                     "text": tweet["text"][:280],
+                    "media": refs,
+                    "caption": caption[:1024] if refs else caption[:4096],
                 }
                 while len(pending) > 40:
                     pending.pop(next(iter(pending)))

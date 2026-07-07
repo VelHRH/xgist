@@ -20,11 +20,11 @@ def call(method: str, files=None, **params):
     return payload["result"]
 
 
-def send_preview(chat_id: int, media: list[tuple[str, str]], caption: str) -> list[int]:
-    """Send the content message(s) a user will approve. Returns their message ids."""
+def send_preview(chat_id: int, media: list[tuple[str, str]], caption: str) -> list[dict]:
+    """Send the content message(s) a user will approve. Returns the Messages."""
     if not media:
         msg = call("sendMessage", chat_id=chat_id, text=caption[:4096])
-        return [msg["message_id"]]
+        return [msg]
 
     if len(media) == 1:
         kind, path = media[0]
@@ -32,7 +32,7 @@ def send_preview(chat_id: int, media: list[tuple[str, str]], caption: str) -> li
         with open(path, "rb") as fh:
             msg = call(method, files={kind: fh},
                        chat_id=chat_id, caption=caption[:1024])
-        return [msg["message_id"]]
+        return [msg]
 
     handles, input_media = [], []
     try:
@@ -52,16 +52,31 @@ def send_preview(chat_id: int, media: list[tuple[str, str]], caption: str) -> li
     finally:
         for fh in handles:
             fh.close()
-    return [m["message_id"] for m in msgs]
+    return msgs
+
+
+def media_refs(msgs: list[dict]) -> list[dict]:
+    """Extract {id, type, file_id} per media message — lets the Worker
+    re-edit the preview (e.g. toggle the spoiler blur) via editMessageMedia."""
+    refs = []
+    for m in msgs:
+        if m.get("photo"):
+            refs.append({"id": m["message_id"], "type": "photo",
+                         "file_id": m["photo"][-1]["file_id"]})
+        elif m.get("video"):
+            refs.append({"id": m["message_id"], "type": "video",
+                         "file_id": m["video"]["file_id"]})
+    return refs
 
 
 def send_controls(chat_id: int, content_ids: list[int], label: str) -> None:
     """Send the approve/skip buttons referencing the content message ids."""
     ids = ",".join(map(str, content_ids))
-    keyboard = {"inline_keyboard": [[
-        {"text": "✅ Post", "callback_data": f"p:{ids}"},
-        {"text": "❌ Skip", "callback_data": f"s:{ids}"},
-    ]]}
+    keyboard = {"inline_keyboard": [
+        [{"text": "✅ Post", "callback_data": f"p:{ids}"},
+         {"text": "❌ Skip", "callback_data": f"s:{ids}"}],
+        [{"text": "🫥 Spoiler", "callback_data": f"sp1:{ids}"}],
+    ]}
     call("sendMessage", chat_id=chat_id, text=label[:4096],
          parse_mode="HTML",
          link_preview_options=json.dumps({"is_disabled": True}),
