@@ -344,8 +344,9 @@ async function handleMessage(msg, env) {
           `You're already Pro until ${u.paid_until.slice(0, 10)} ⭐`);
       }
       const price = Number(env.PRO_PRICE_STARS || 550);
-      const res = await tg(env, "sendInvoice", {
-        chat_id: chatId,
+      // Subscription invoices can only be created as links (sendInvoice with
+      // subscription_period fails with SUBSCRIPTION_EXPORT_MISSING).
+      const res = await tg(env, "createInvoiceLink", {
         title: "XDigest Pro",
         description:
           "Up to 6 digest times per day and 25 watched accounts. " +
@@ -359,7 +360,13 @@ async function handleMessage(msg, env) {
         return reply(env, chatId,
           `Couldn't create the invoice: ${esc(res.description || "unknown error")}`);
       }
-      return;
+      return reply(env, chatId,
+        `⭐ <b>XDigest Pro</b> — ${price} Stars / month\n` +
+        `6 digest times a day · 25 watched accounts\n` +
+        `Renews automatically; cancel anytime in Telegram Settings → My Stars.`,
+        { reply_markup: { inline_keyboard: [[
+          { text: `⭐ Subscribe — ${price} Stars/mo`, url: res.result },
+        ]] } });
     }
 
     case "/channel": {
