@@ -41,7 +41,9 @@ LANGUAGES = {"en": "English", "uk": "Ukrainian", "ru": "Russian"}
 
 def make_caption(tweet: dict, user: dict) -> str:
     fallback = tweet["text"][:900].strip()
-    if not tweet["text"] or not os.getenv("ANTHROPIC_API_KEY"):
+    # Don't invoke Claude if there's no meaningful text to rewrite — it would
+    # hallucinate or refuse ("I can't see the image") rather than produce a post.
+    if len(fallback) < 30 or not os.getenv("ANTHROPIC_API_KEY"):
         return format_caption(fallback)
     try:
         return format_caption(_claude_caption(tweet, user))
@@ -60,17 +62,18 @@ def _claude_caption(tweet: dict, user: dict) -> str:
         model=CLAUDE_MODEL,
         max_tokens=600,
         system=(
-            "You write posts for a Telegram channel based on tweets. "
+            "You write posts for a Telegram channel based on tweet text. "
             "Rewrite the tweet as a clean, self-contained channel post. "
             f"Write the post in {language}, translating if the tweet is in "
             "another language. "
-            "Plain text only, under 800 characters, no preamble, no quotes "
-            "around it, no links. "
+            "Output ONLY the finished post — no preamble, no reasoning, no "
+            "revision notes, no self-corrections, no meta-commentary. "
+            "Under 800 characters, no hashtags, no links, no quotes around the post. "
             f"Style guide from the channel owner: {style}"
         ),
         messages=[{
             "role": "user",
-            "content": f"Tweet by @{tweet['source']}:\n\n{tweet['text']}",
+            "content": f"Tweet text by @{tweet['source']}:\n\n{tweet['text']}",
         }],
     )
     text = next(b.text for b in response.content if b.type == "text")
