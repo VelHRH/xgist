@@ -76,7 +76,8 @@ def send_controls(chat_id: int, content_ids: list[int], label: str) -> None:
     keyboard = {"inline_keyboard": [
         [{"text": "✅ Post", "callback_data": f"p:{ids}"},
          {"text": "❌ Skip", "callback_data": f"s:{ids}"}],
-        [{"text": "🫥 Spoiler", "callback_data": f"sp1:{ids}"}],
+        [{"text": "✏️ Edit", "callback_data": f"e:{ids}"},
+         {"text": "🫥 Spoiler", "callback_data": f"sp1:{ids}"}],
     ]}
     call("sendMessage", chat_id=chat_id, text=label[:4096],
          parse_mode="HTML",

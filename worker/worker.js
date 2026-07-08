@@ -32,7 +32,7 @@ Setup — 3 steps:
 
 3️⃣ /schedule 9,18 — hours (0-23) when I bring you a digest (1 time/day free · 6 with Pro)
 
-At those hours you'll get previews here. Tap ✅ Post — it's in your channel. Tap ❌ Skip — nobody ever sees it. Tap 🫥 Spoiler to blur the media and text before posting.
+At those hours you'll get previews here. Tap ✅ Post — it's in your channel. Tap ❌ Skip — nobody ever sees it. Tap ✏️ Edit to rewrite the text or swap the images before posting. Tap 🫥 Spoiler to blur the media and text.
 
 Fine-tuning:
 🌐 /lang en | uk | ru — post language (default: en)
@@ -117,7 +117,7 @@ function setupHints({ channel, sources }) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method !== "POST") return serveSite(request, env);
     if (request.headers.get("x-telegram-bot-api-secret-token") !== env.WEBHOOK_SECRET) {
       return new Response("forbidden", { status: 403 });
@@ -136,7 +136,7 @@ export default {
           ok: true,
         });
       } else if (update.callback_query) await handleCallback(update.callback_query, env);
-      else if (update.message) await handleMessage(update.message, env);
+      else if (update.message) await handleMessage(update.message, env, ctx);
     } catch (err) {
       console.log("handler error:", err.stack || err);
     }
@@ -331,6 +331,45 @@ async function recordFeedback(env, chatId, idsStr, verdict) {
   }
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Read-modify-write the user's pending previews in state.json, retrying on
+ *  sha conflicts (concurrent webhook updates, digest commits). The callback
+ *  gets the pending map; return false to abort without saving. */
+async function mutatePending(env, chatId, mutate) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const st = await ghGetJson(env, "state.json");
+      const pending = st?.data?.users?.[String(chatId)]?.pending;
+      if (!pending) return false;
+      if (mutate(pending) === false) return false;
+      if (await ghPutJson(env, "state.json", st.data, st.sha)) return true;
+    } catch (err) {
+      console.log("state save attempt failed:", err);
+    }
+    await sleep(300 + Math.random() * 700);
+  }
+  return false;
+}
+
+/** Set (or clear, with null) the user's pending-✏️-edit marker in users.json. */
+async function setEditing(env, chatId, value) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const { config, sha } = await loadConfig(env);
+      const user = config.users?.[String(chatId)];
+      if (!user) return false;
+      if (value) user.editing = value;
+      else delete user.editing;
+      await saveConfig(env, config, sha);
+      return true;
+    } catch (err) {
+      if (attempt === 2) console.log("editing flag save failed:", err);
+    }
+  }
+  return false;
+}
+
 /* ---------------- Commands ---------------- */
 
 function userDefaults() {
@@ -338,7 +377,7 @@ function userDefaults() {
            limit: 3, interests: null, style: null, language: "en" };
 }
 
-async function handleMessage(msg, env) {
+async function handleMessage(msg, env, ctx) {
   if (msg.chat.type !== "private") return;
   const chatId = msg.chat.id;
 
@@ -371,6 +410,22 @@ async function handleMessage(msg, env) {
         (sp.is_recurring ? " (recurring)" : ""));
     }
     return;
+  }
+
+  // A pending ✏️ Edit captures the next regular message as the new post
+  // content: text replaces the caption, attached photos replace all media.
+  const commandish =
+    !!msg.text && (MENU_BUTTONS[msg.text.trim()] || msg.text.trim()).startsWith("/");
+  if (!commandish && (msg.text || msg.caption || msg.photo || msg.video)) {
+    let editing = null;
+    try {
+      editing = (await loadConfig(env)).config.users?.[String(chatId)]?.editing;
+    } catch (err) {
+      console.log("config load failed:", err);
+    }
+    if (editing && editing.until > Date.now()) {
+      return handleEditContent(msg, editing, env, ctx);
+    }
   }
 
   if (!msg.text) return;
@@ -727,11 +782,63 @@ async function handleCallback(cb, env) {
       reply_markup: { inline_keyboard: [
         [{ text: "✅ Post", callback_data: `p:${idsStr}` },
          { text: "❌ Skip", callback_data: `s:${idsStr}` }],
-        [{ text: on ? "🫥 Remove spoiler" : "🫥 Spoiler",
+        [{ text: "✏️ Edit", callback_data: `e:${idsStr}` },
+         { text: on ? "🫥 Remove spoiler" : "🫥 Spoiler",
            callback_data: `${on ? "sp0" : "sp1"}:${idsStr}` }],
       ]},
     });
     return answer(on ? "Spoiler on — it stays when you publish" : "Spoiler off");
+  }
+
+  // ✏️ edit: arm the user's "editing" marker — their next regular message
+  // becomes the new post content (see handleEditContent).
+  if (cb.data.startsWith("e:")) {
+    const ids = cb.data.slice(2).split(",").map(Number);
+    let entry = null;
+    try {
+      const st = await ghGetJson(env, "state.json");
+      entry = st?.data?.users?.[String(chatId)]?.pending?.[String(ids[0])];
+    } catch (err) {
+      console.log("state load failed:", err);
+    }
+    if (!entry) {
+      return answer("Preview data isn't synced yet — try again in a minute.", true);
+    }
+    const prompt = [];
+    if (entry.caption) {
+      const res = await tg(env, "sendMessage", {
+        chat_id: chatId, text: entry.caption, parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+      });
+      if (res.ok) prompt.push(res.result.message_id);
+    }
+    const instr = await reply(env, chatId,
+      "✏️ Send me the new version as a regular message.\n\n" +
+      "• text — replaces the caption (current text is above, long-press to copy)\n" +
+      "• photos/video — replace ALL current media (add text to change both)\n" +
+      "• \"-\" — removes the caption",
+      { reply_markup: { inline_keyboard: [[
+        { text: "✖️ Cancel", callback_data: "ec" },
+      ]] } });
+    if (instr.ok) prompt.push(instr.result.message_id);
+    const ok = await setEditing(env, chatId, {
+      ids, control: controlId, prompt, until: Date.now() + 10 * 60 * 1000,
+    });
+    if (!ok) return answer("Storage hiccup — tap ✏️ Edit again.", true);
+    return answer("");
+  }
+
+  if (cb.data === "ec") {
+    try {
+      const editing = (await loadConfig(env)).config.users?.[String(chatId)]?.editing;
+      for (const id of editing?.prompt || []) {
+        await tg(env, "deleteMessage", { chat_id: chatId, message_id: id });
+      }
+    } catch (err) {
+      console.log("edit cancel cleanup failed:", err);
+    }
+    await setEditing(env, chatId, null);
+    return answer("Edit cancelled");
   }
 
   if (cb.data === "s" || cb.data.startsWith("s:")) {
@@ -765,6 +872,159 @@ async function handleCallback(cb, env) {
   }
 
   return answer("");
+}
+
+/* ---------------- ✏️ Edit a pending preview ---------------- */
+
+/** Apply the user's edit message to the preview armed by the ✏️ button.
+ *  Text-only edits rewrite the caption in place; attached media replace the
+ *  whole preview (old messages deleted, new ones sent from the uploaded
+ *  file_ids), so ✅ Post later copies exactly what the user sees. */
+async function handleEditContent(msg, editing, env, ctx) {
+  const chatId = msg.chat.id;
+  const firstId = String(editing.ids[0]);
+  let entry = null;
+  try {
+    const st = await ghGetJson(env, "state.json");
+    entry = st?.data?.users?.[String(chatId)]?.pending?.[firstId];
+  } catch (err) {
+    console.log("state load failed:", err);
+  }
+  if (!entry) {
+    await setEditing(env, chatId, null);
+    return reply(env, chatId, "Can't find that preview anymore — tap ✏️ Edit again.");
+  }
+
+  const raw = (msg.text ?? msg.caption ?? "").trim();
+  const newCaption = raw === "-" ? "" : raw ? esc(raw) : null; // null → keep current
+  const item = msg.photo
+    ? { type: "photo", file_id: msg.photo.at(-1).file_id }
+    : msg.video ? { type: "video", file_id: msg.video.file_id } : null;
+  if (!item && newCaption === null) return; // sticker/voice/etc — not applicable
+
+  if (!item) {
+    // Text-only edit: media stays, caption changes in place.
+    if (entry.media?.length) {
+      await tg(env, "editMessageCaption", {
+        chat_id: chatId, message_id: entry.media[0].id,
+        caption: newCaption.slice(0, 1024), parse_mode: "HTML",
+      });
+    } else {
+      if (!newCaption) {
+        return reply(env, chatId, "A text-only post can't have empty text.");
+      }
+      await tg(env, "editMessageText", {
+        chat_id: chatId, message_id: Number(firstId),
+        text: newCaption.slice(0, 4096), parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+      });
+    }
+    await mutatePending(env, chatId, (pending) => {
+      if (!pending[firstId]) return false;
+      pending[firstId].caption = newCaption;
+    });
+    await finishEdit(env, chatId, editing);
+    return tg(env, "setMessageReaction", {
+      chat_id: chatId, message_id: msg.message_id,
+      reaction: [{ type: "emoji", emoji: "👍" }],
+    });
+  }
+
+  if (!msg.media_group_id) {
+    return applyRebuild(env, chatId, editing, entry, firstId, [item],
+      newCaption ?? entry.caption);
+  }
+
+  // Album: Telegram delivers each photo as a separate update. Stage them in
+  // state.json; after a pause, the update holding the highest message_id
+  // rebuilds the preview with everything collected.
+  const group = msg.media_group_id;
+  await mutatePending(env, chatId, (pending) => {
+    const e = pending[firstId];
+    if (!e) return false;
+    if (e.staged?.group !== group) e.staged = { group, items: [], text: null };
+    e.staged.items.push({ ...item, mid: msg.message_id });
+    if (newCaption !== null) e.staged.text = newCaption;
+  });
+  const work = (async () => {
+    await sleep(3000);
+    const st = await ghGetJson(env, "state.json");
+    const e = st?.data?.users?.[String(chatId)]?.pending?.[firstId];
+    const staged = e?.staged;
+    if (!staged || staged.group !== group) return;
+    if (Math.max(...staged.items.map((i) => i.mid)) !== msg.message_id) return;
+    const items = [...staged.items].sort((a, b) => a.mid - b.mid).slice(0, 10);
+    await applyRebuild(env, chatId, editing, e, firstId, items,
+      staged.text ?? e.caption);
+  })().catch((err) => console.log("album edit failed:", err));
+  if (ctx) ctx.waitUntil(work);
+  else await work;
+}
+
+/** Replace the preview wholesale: delete the old messages, resend media from
+ *  the user's uploaded file_ids, issue fresh control buttons, and re-key the
+ *  pending entry so ✅/❌/🫥/✏️ keep working on the new message ids. */
+async function applyRebuild(env, chatId, editing, entry, firstId, items, captionHtml) {
+  const caption = (captionHtml || "").slice(0, 1024);
+  let msgs;
+  if (items.length === 1) {
+    const { type, file_id } = items[0];
+    const res = await tg(env, type === "photo" ? "sendPhoto" : "sendVideo", {
+      chat_id: chatId, [type]: file_id,
+      ...(caption ? { caption, parse_mode: "HTML" } : {}),
+    });
+    if (!res.ok) return reply(env, chatId, "Couldn't rebuild the preview — try again.");
+    msgs = [res.result];
+  } else {
+    const res = await tg(env, "sendMediaGroup", {
+      chat_id: chatId,
+      media: items.map((it, i) => ({
+        type: it.type, media: it.file_id,
+        ...(i === 0 && caption ? { caption, parse_mode: "HTML" } : {}),
+      })),
+    });
+    if (!res.ok) return reply(env, chatId, "Couldn't rebuild the preview — try again.");
+    msgs = res.result;
+  }
+  for (const id of [...editing.ids, editing.control]) {
+    await tg(env, "deleteMessage", { chat_id: chatId, message_id: id });
+  }
+  const ids = msgs.map((m) => m.message_id);
+  const refs = msgs.map((m) => m.photo
+    ? { id: m.message_id, type: "photo", file_id: m.photo.at(-1).file_id }
+    : { id: m.message_id, type: "video", file_id: m.video.file_id });
+  const idsStr = ids.join(",");
+  let channel = null;
+  try {
+    channel = (await loadConfig(env)).config.users?.[String(chatId)]?.channel;
+  } catch (err) {
+    console.log("config load failed:", err);
+  }
+  const dest = typeof channel === "string" ? esc(channel) : "your channel";
+  await reply(env, chatId,
+    `✏️ edited · <a href="https://x.com/${entry.source}">@${esc(entry.source)}</a>` +
+    `\nPublish to ${dest}?`,
+    { reply_markup: { inline_keyboard: [
+      [{ text: "✅ Post", callback_data: `p:${idsStr}` },
+       { text: "❌ Skip", callback_data: `s:${idsStr}` }],
+      [{ text: "✏️ Edit", callback_data: `e:${idsStr}` },
+       { text: "🫥 Spoiler", callback_data: `sp1:${idsStr}` }],
+    ] } });
+  await mutatePending(env, chatId, (pending) => {
+    delete pending[firstId];
+    pending[String(ids[0])] = {
+      source: entry.source, text: entry.text, media: refs, caption,
+    };
+  });
+  await finishEdit(env, chatId, editing);
+}
+
+/** Clean up the ✏️ prompt messages and disarm the editing marker. */
+async function finishEdit(env, chatId, editing) {
+  for (const id of editing.prompt || []) {
+    await tg(env, "deleteMessage", { chat_id: chatId, message_id: id });
+  }
+  await setEditing(env, chatId, null);
 }
 
 /* ---------------- Landing page (GET requests) ---------------- */
