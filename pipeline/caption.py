@@ -8,9 +8,14 @@ from .config import CLAUDE_MODEL
 
 log = logging.getLogger(__name__)
 
-# Matches «...» or "..." or "..." with at least 15 chars inside.
-# Guillemets dominate RU/UK text; curly/straight double quotes cover EN.
-_QUOTE_RE = re.compile(r'[«“"](.{15,}?)[»”"]', re.DOTALL)
+# Matches «...» or "..." or "..." — guillemets dominate RU/UK text,
+# curly/straight double quotes cover EN. Whether a match becomes a
+# blockquote is decided by its word count (see MIN_QUOTE_WORDS).
+_QUOTE_RE = re.compile(r'[«“"](.+?)[»”"]', re.DOTALL)
+
+# Short quoted fragments ("scare quotes", titles, single terms) are part of
+# the sentence, not a citation — only blockquote longer passages.
+MIN_QUOTE_WORDS = 6
 
 
 def _escape(text: str) -> str:
@@ -25,6 +30,8 @@ def format_caption(text: str) -> str:
     parts: list[str] = []
     last_end = 0
     for m in _QUOTE_RE.finditer(text):
+        if len(m.group(1).split()) < MIN_QUOTE_WORDS:
+            continue  # too short for a citation — stays inline, quotes and all
         before = text[last_end:m.start()].rstrip(":— \n")
         if before.strip():
             parts.append(_escape(before.strip()))

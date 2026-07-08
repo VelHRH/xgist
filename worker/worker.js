@@ -903,31 +903,13 @@ async function handleEditContent(msg, editing, env, ctx) {
   if (!item && newCaption === null) return; // sticker/voice/etc — not applicable
 
   if (!item) {
-    // Text-only edit: media stays, caption changes in place.
-    if (entry.media?.length) {
-      await tg(env, "editMessageCaption", {
-        chat_id: chatId, message_id: entry.media[0].id,
-        caption: newCaption.slice(0, 1024), parse_mode: "HTML",
-      });
-    } else {
-      if (!newCaption) {
-        return reply(env, chatId, "A text-only post can't have empty text.");
-      }
-      await tg(env, "editMessageText", {
-        chat_id: chatId, message_id: Number(firstId),
-        text: newCaption.slice(0, 4096), parse_mode: "HTML",
-        link_preview_options: { is_disabled: true },
-      });
+    // Text-only edit: keep the current media (file_ids from state.json) and
+    // rebuild the preview with the new caption, same as a media edit.
+    if (!newCaption && !entry.media?.length) {
+      return reply(env, chatId, "A text-only post can't have empty text.");
     }
-    await mutatePending(env, chatId, (pending) => {
-      if (!pending[firstId]) return false;
-      pending[firstId].caption = newCaption;
-    });
-    await finishEdit(env, chatId, editing);
-    return tg(env, "setMessageReaction", {
-      chat_id: chatId, message_id: msg.message_id,
-      reaction: [{ type: "emoji", emoji: "👍" }],
-    });
+    return applyRebuild(env, chatId, editing, entry, firstId,
+      entry.media || [], newCaption);
   }
 
   if (!msg.media_group_id) {
@@ -965,9 +947,16 @@ async function handleEditContent(msg, editing, env, ctx) {
  *  the user's uploaded file_ids, issue fresh control buttons, and re-key the
  *  pending entry so ✅/❌/🫥/✏️ keep working on the new message ids. */
 async function applyRebuild(env, chatId, editing, entry, firstId, items, captionHtml) {
-  const caption = (captionHtml || "").slice(0, 1024);
+  const caption = (captionHtml || "").slice(0, items.length ? 1024 : 4096);
   let msgs;
-  if (items.length === 1) {
+  if (!items.length) {
+    const res = await tg(env, "sendMessage", {
+      chat_id: chatId, text: caption, parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+    });
+    if (!res.ok) return reply(env, chatId, "Couldn't rebuild the preview — try again.");
+    msgs = [res.result];
+  } else if (items.length === 1) {
     const { type, file_id } = items[0];
     const res = await tg(env, type === "photo" ? "sendPhoto" : "sendVideo", {
       chat_id: chatId, [type]: file_id,
@@ -990,7 +979,7 @@ async function applyRebuild(env, chatId, editing, entry, firstId, items, caption
     await tg(env, "deleteMessage", { chat_id: chatId, message_id: id });
   }
   const ids = msgs.map((m) => m.message_id);
-  const refs = msgs.map((m) => m.photo
+  const refs = msgs.filter((m) => m.photo || m.video).map((m) => m.photo
     ? { id: m.message_id, type: "photo", file_id: m.photo.at(-1).file_id }
     : { id: m.message_id, type: "video", file_id: m.video.file_id });
   const idsStr = ids.join(",");
