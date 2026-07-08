@@ -248,6 +248,27 @@ async function setupCommands(env) {
 const esc = (s) => String(s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+// Mirror of format_caption in pipeline/caption.py — keep the two in sync.
+// Wraps quoted passages of MIN_QUOTE_WORDS+ words in <blockquote> so text
+// sent via ✏️ Edit is formatted the same way as digest-generated captions.
+const QUOTE_RE = /[«“"]([\s\S]+?)[»”"]/g;
+const MIN_QUOTE_WORDS = 6;
+
+function formatCaption(text) {
+  const parts = [];
+  let lastEnd = 0;
+  for (const m of text.matchAll(QUOTE_RE)) {
+    if (m[1].trim().split(/\s+/).length < MIN_QUOTE_WORDS) continue;
+    const before = text.slice(lastEnd, m.index).replace(/[:— \n]+$/, "").trim();
+    if (before) parts.push(esc(before));
+    parts.push(`<blockquote>${esc(m[1].trim())}</blockquote>`);
+    lastEnd = m.index + m[0].length;
+  }
+  const after = text.slice(lastEnd).replace(/^[.,!? \n]+/, "").trim();
+  if (after) parts.push(esc(after));
+  return parts.join("\n\n");
+}
+
 // Link an X handle to x.com — a bare @handle in a message would render as a
 // (wrong) Telegram profile link.
 const xlink = (h) => `<a href="https://x.com/${h}">@${h}</a>`;
@@ -896,7 +917,7 @@ async function handleEditContent(msg, editing, env, ctx) {
   }
 
   const raw = (msg.text ?? msg.caption ?? "").trim();
-  const newCaption = raw === "-" ? "" : raw ? esc(raw) : null; // null → keep current
+  const newCaption = raw === "-" ? "" : raw ? formatCaption(raw) : null; // null → keep current
   const item = msg.photo
     ? { type: "photo", file_id: msg.photo.at(-1).file_id }
     : msg.video ? { type: "video", file_id: msg.video.file_id } : null;

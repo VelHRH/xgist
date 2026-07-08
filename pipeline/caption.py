@@ -26,6 +26,7 @@ def format_caption(text: str) -> str:
     """Wrap quoted passages in <blockquote> tags and split into paragraphs.
 
     Returns HTML-escaped text safe for Telegram's parse_mode=HTML.
+    Mirrored as formatCaption in worker/worker.js (✏️ Edit) — keep in sync.
     """
     parts: list[str] = []
     last_end = 0
