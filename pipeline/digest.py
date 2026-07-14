@@ -96,12 +96,20 @@ def _apply_plan(uid: str, cfg: dict, whitelist: list, now: datetime) -> dict:
     return clamped
 
 
+# Tweets posted shortly before the previous digest get a second look — their
+# engagement had barely formed when first considered, so a future viral hit
+# could lose once and never be seen again. The `proposed` id list keeps the
+# overlap from re-proposing tweets that already got a preview.
+RECONSIDER_HOURS = 2
+
+
 def _window_start(user_state: dict, now: datetime) -> datetime:
     floor = now - timedelta(hours=MAX_TWEET_AGE_HOURS)
     last = user_state.get("last_digest_at")
     if last:
         try:
-            return max(datetime.fromisoformat(last), floor)
+            since = datetime.fromisoformat(last) - timedelta(hours=RECONSIDER_HOURS)
+            return max(since, floor)
         except ValueError:
             pass
     return floor
@@ -157,9 +165,10 @@ def main() -> None:
     for uid, cfg in due.items():
         user_state = state.setdefault(uid, {})
         start = _window_start(user_state, now)
+        already_proposed = set(user_state.get("proposed") or [])
         candidates = [
             t for s in cfg["sources"] for t in fetched.get(s, [])
-            if start < t["date"] <= now
+            if start < t["date"] <= now and t["id"] not in already_proposed
         ]
         log.info("user %s: %d candidates since %s", uid, len(candidates), start)
 
@@ -194,6 +203,9 @@ def main() -> None:
                 }
                 while len(pending) > 40:
                     pending.pop(next(iter(pending)))
+                proposed = user_state.setdefault("proposed", [])
+                proposed.append(tweet["id"])
+                del proposed[:-200]
                 sent += 1
             except Exception:
                 log.exception("failed to preview tweet %s for user %s", tweet["id"], uid)
