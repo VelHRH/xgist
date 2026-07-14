@@ -249,17 +249,22 @@ const esc = (s) => String(s)
 // Mirror of format_caption in pipeline/caption.py — keep the two in sync.
 // Wraps quoted passages of MIN_QUOTE_WORDS+ words in <blockquote> so text
 // sent via ✏️ Edit is formatted the same way as digest-generated captions.
-const QUOTE_RE = /[«“"]([\s\S]+?)[»”"]/g;
+// Each quote style only closes with its own pair, so a nested quote of
+// another style («… "…" …») can't cut the outer one short.
+const QUOTE_RE = /«([^«»]+)»|“([^“”]+)”|"([^"]+)"/g;
 const MIN_QUOTE_WORDS = 6;
 
 function formatCaption(text) {
   const parts = [];
   let lastEnd = 0;
   for (const m of text.matchAll(QUOTE_RE)) {
-    if (m[1].trim().split(/\s+/).length < MIN_QUOTE_WORDS) continue;
+    const inner = m[1] ?? m[2] ?? m[3];
+    if (inner.trim().split(/\s+/).length < MIN_QUOTE_WORDS) continue;
     const before = text.slice(lastEnd, m.index).replace(/[:— \n]+$/, "").trim();
     if (before) parts.push(esc(before));
-    parts.push(`<blockquote>${esc(m[1].trim())}</blockquote>`);
+    // Keep the quote marks: the blockquote styles the passage, the marks
+    // still signal it's a citation.
+    parts.push(`<blockquote>${esc(m[0].trim())}</blockquote>`);
     lastEnd = m.index + m[0].length;
   }
   const after = text.slice(lastEnd).replace(/^[.,!? \n]+/, "").trim();

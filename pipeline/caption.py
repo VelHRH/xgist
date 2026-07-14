@@ -8,10 +8,12 @@ from .config import CLAUDE_MODEL
 
 log = logging.getLogger(__name__)
 
-# Matches «...» or "..." or "..." — guillemets dominate RU/UK text,
-# curly/straight double quotes cover EN. Whether a match becomes a
-# blockquote is decided by its word count (see MIN_QUOTE_WORDS).
-_QUOTE_RE = re.compile(r'[«“"](.+?)[»”"]', re.DOTALL)
+# Matches «...» or “...” or "..." — guillemets dominate RU/UK text,
+# curly/straight double quotes cover EN. Each style only closes with its
+# own pair, so a nested quote of another style («… "…" …») can't cut the
+# outer one short. Whether a match becomes a blockquote is decided by its
+# word count (see MIN_QUOTE_WORDS).
+_QUOTE_RE = re.compile(r'«([^«»]+)»|“([^“”]+)”|"([^"]+)"')
 
 # Short quoted fragments ("scare quotes", titles, single terms) are part of
 # the sentence, not a citation — only blockquote longer passages.
@@ -31,12 +33,15 @@ def format_caption(text: str) -> str:
     parts: list[str] = []
     last_end = 0
     for m in _QUOTE_RE.finditer(text):
-        if len(m.group(1).split()) < MIN_QUOTE_WORDS:
+        inner = next(g for g in m.groups() if g is not None)
+        if len(inner.split()) < MIN_QUOTE_WORDS:
             continue  # too short for a citation — stays inline, quotes and all
         before = text[last_end:m.start()].rstrip(":— \n")
         if before.strip():
             parts.append(_escape(before.strip()))
-        parts.append(f"<blockquote>{_escape(m.group(1).strip())}</blockquote>")
+        # Keep the quote marks: the blockquote styles the passage, the marks
+        # still signal it's a citation.
+        parts.append(f"<blockquote>{_escape(m.group(0).strip())}</blockquote>")
         last_end = m.end()
     after = text[last_end:].lstrip(".,!? \n").strip()
     if after:
