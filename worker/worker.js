@@ -36,7 +36,7 @@ Setup — 3 steps:
 
 3️⃣ /schedule 9,18 — hours (0-23) when I bring you a digest (1 time/day free · 6 with Pro)
 
-At those hours you'll get previews here. Tap ✅ Post — it's in your channel. Tap ❌ Skip — nobody ever sees it. Tap ✏️ Edit to rewrite the text or swap the images before posting. Tap 🫥 Spoiler to blur the media and text.
+At those hours you'll get previews here. Tap ✅ Post — it's in your channel. Tap ❌ Skip — nobody ever sees it. Tap ✏️ Edit to rewrite the text or swap the images before posting. Tap 🫥 Spoiler to blur the media and text. Tap 🕐 Schedule to publish at a later hour instead of right away.
 
 Fine-tuning:
 🌐 /lang en | uk | ru — post language (default: en)
@@ -145,7 +145,7 @@ export default {
   // GitHub's own schedule silently drops hourly slots, so the Worker kicks
   // each run via workflow_dispatch — those execute promptly and reliably.
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(
+    ctx.waitUntil(Promise.all([
       fetch(
         `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/digest.yml/dispatches`,
         {
@@ -158,7 +158,8 @@ export default {
           console.log("cron dispatch failed:", resp.status, await resp.text());
         }
       }),
-    );
+      publishScheduled(env),
+    ]));
   },
 };
 
@@ -284,6 +285,7 @@ const xlink = (h) => `<a href="https://x.com/${h}">@${h}</a>`;
  *   promo         — set of ids that claimed the early-access month
  *   state:<id>    — JSON per-user pipeline state (pending previews, last run)
  *   feedback:<id> — list of JSON ✅/❌ verdicts, oldest first, trimmed to 30
+ *   sched         — hash <chatId>:<controlId> → JSON scheduled-publish job
  */
 
 async function redis(env, ...cmd) {
@@ -723,6 +725,26 @@ async function setField(env, chatId, mutate, confirmation) {
 
 /* ---------------- One-click publish ---------------- */
 
+/** The preview's control buttons. Mirrored in pipeline/tg.py send_controls —
+ *  keep the two in sync. */
+function controlKeyboard(idsStr, spoilerOn = false) {
+  return { inline_keyboard: [
+    [{ text: "✅ Post", callback_data: `p:${idsStr}` },
+     { text: "🕐 Schedule", callback_data: `sc:${idsStr}` }],
+    [{ text: "❌ Skip", callback_data: `s:${idsStr}` },
+     { text: "✏️ Edit", callback_data: `e:${idsStr}` }],
+    [{ text: spoilerOn ? "🫥 Remove spoiler" : "🫥 Spoiler",
+       callback_data: `${spoilerOn ? "sp0" : "sp1"}:${idsStr}` }],
+  ] };
+}
+
+/** Current hour (0-23) in an IANA timezone. */
+const hourIn = (tz) => Number(new Intl.DateTimeFormat("en-GB", {
+  timeZone: tz, hour: "2-digit", hourCycle: "h23",
+}).format(new Date()));
+
+const DEFAULT_TZ = "Europe/Kyiv";
+
 async function handleCallback(cb, env) {
   const chatId = cb.message.chat.id;
   const controlId = cb.message.message_id;
@@ -768,13 +790,7 @@ async function handleCallback(cb, env) {
     }
     await tg(env, "editMessageReplyMarkup", {
       chat_id: chatId, message_id: controlId,
-      reply_markup: { inline_keyboard: [
-        [{ text: "✅ Post", callback_data: `p:${idsStr}` },
-         { text: "❌ Skip", callback_data: `s:${idsStr}` }],
-        [{ text: "✏️ Edit", callback_data: `e:${idsStr}` },
-         { text: on ? "🫥 Remove spoiler" : "🫥 Spoiler",
-           callback_data: `${on ? "sp0" : "sp1"}:${idsStr}` }],
-      ]},
+      reply_markup: controlKeyboard(idsStr, on),
     });
     return answer(on ? "Spoiler on — it stays when you publish" : "Spoiler off");
   }
@@ -829,6 +845,73 @@ async function handleCallback(cb, env) {
     return answer("Edit cancelled");
   }
 
+  // 🕐 schedule: swap the control buttons for an hour grid; the pick is
+  // stored in the "sched" hash and published by the hourly cron (the digest
+  // cron already fires at :00 every hour, so only whole hours make sense).
+  if (cb.data.startsWith("sc:")) {
+    const idsStr = cb.data.slice(3);
+    const rows = [];
+    for (let h = 0; h < 24; h += 6) {
+      rows.push(Array.from({ length: 6 }, (_, i) => ({
+        text: String(h + i).padStart(2, "0"),
+        callback_data: `sh${h + i}:${idsStr}`,
+      })));
+    }
+    rows.push([{ text: "⬅️ Back", callback_data: `sb:${idsStr}` }]);
+    await tg(env, "editMessageReplyMarkup", {
+      chat_id: chatId, message_id: controlId,
+      reply_markup: { inline_keyboard: rows },
+    });
+    return answer("Pick the hour to publish (your timezone)");
+  }
+
+  if (cb.data.startsWith("sb:")) {
+    await tg(env, "editMessageReplyMarkup", {
+      chat_id: chatId, message_id: controlId,
+      reply_markup: controlKeyboard(cb.data.slice(3)),
+    });
+    return answer("");
+  }
+
+  if (/^sh\d+:/.test(cb.data)) {
+    const [head, idsStr] = cb.data.split(":");
+    const hour = Number(head.slice(2));
+    const user = await loadUser(env, chatId);
+    if (!user?.channel) return answer("Set your channel first: /channel @name", true);
+    const tz = user.timezone || DEFAULT_TZ;
+    try {
+      await redis(env, "HSET", "sched", `${chatId}:${controlId}`, JSON.stringify({
+        chat: chatId, control: controlId, ids: idsStr, hour, tz,
+      }));
+    } catch (err) {
+      console.log("schedule save failed:", err);
+      return answer("Storage hiccup — try again.", true);
+    }
+    const label = `${String(hour).padStart(2, "0")}:00`;
+    await tg(env, "editMessageReplyMarkup", {
+      chat_id: chatId, message_id: controlId,
+      reply_markup: { inline_keyboard: [[
+        { text: `🕐 Scheduled for ${label} — tap to cancel`,
+          callback_data: `su:${idsStr}` },
+      ]] },
+    });
+    return answer(`Will publish at the next ${label} (${tz})`);
+  }
+
+  if (cb.data.startsWith("su:")) {
+    try {
+      await redis(env, "HDEL", "sched", `${chatId}:${controlId}`);
+    } catch (err) {
+      console.log("schedule cancel failed:", err);
+      return answer("Storage hiccup — try again.", true);
+    }
+    await tg(env, "editMessageReplyMarkup", {
+      chat_id: chatId, message_id: controlId,
+      reply_markup: controlKeyboard(cb.data.slice(3)),
+    });
+    return answer("Schedule cancelled");
+  }
+
   if (cb.data === "s" || cb.data.startsWith("s:")) {
     await tg(env, "editMessageText",
       { chat_id: chatId, message_id: controlId, text: "❌ Skipped" });
@@ -859,6 +942,58 @@ async function handleCallback(cb, env) {
   }
 
   return answer("");
+}
+
+/* ---------------- 🕐 Scheduled publishing ---------------- */
+
+/** Publish every "sched" entry whose local hour has arrived. Runs from the
+ *  hourly cron; entries are dropped after one attempt (success or not) so a
+ *  broken one can't retry forever. */
+async function publishScheduled(env) {
+  let flat;
+  try {
+    flat = await redis(env, "HGETALL", "sched");
+  } catch (err) {
+    console.log("sched load failed:", err);
+    return;
+  }
+  if (!flat?.length) return;
+  for (let i = 0; i < flat.length; i += 2) {
+    const field = flat[i];
+    let job;
+    try {
+      job = JSON.parse(flat[i + 1]);
+      if (hourIn(job.tz) !== job.hour) continue;
+    } catch (err) {
+      console.log(`dropping bad sched entry ${field}:`, err);
+      await redis(env, "HDEL", "sched", field);
+      continue;
+    }
+    try {
+      const user = await loadUser(env, job.chat);
+      const ids = job.ids.split(",").map(Number).sort((a, b) => a - b);
+      const result = user?.channel && await tg(env, "copyMessages", {
+        chat_id: user.channel, from_chat_id: job.chat, message_ids: ids,
+      });
+      if (result?.ok) {
+        const dest = typeof user.channel === "string" ? user.channel : "your channel";
+        await tg(env, "editMessageText", {
+          chat_id: job.chat, message_id: job.control,
+          text: `✅ Posted to ${dest} (scheduled)`,
+        });
+        await recordFeedback(env, job.chat, job.ids, "approved");
+      } else {
+        await tg(env, "editMessageText", {
+          chat_id: job.chat, message_id: job.control,
+          text: `⚠️ Scheduled post failed: ${result?.description || "no channel set"}. ` +
+                "The preview above is untouched — post it manually.",
+        });
+      }
+    } catch (err) {
+      console.log(`scheduled publish failed for ${field}:`, err);
+    }
+    await redis(env, "HDEL", "sched", field);
+  }
 }
 
 /* ---------------- ✏️ Edit a pending preview ---------------- */
@@ -978,12 +1113,7 @@ async function applyRebuild(env, chatId, editing, entry, firstId, items, caption
   await reply(env, chatId,
     `✏️ edited · <a href="https://x.com/${entry.source}">@${esc(entry.source)}</a>` +
     `\nPublish to ${dest}?`,
-    { reply_markup: { inline_keyboard: [
-      [{ text: "✅ Post", callback_data: `p:${idsStr}` },
-       { text: "❌ Skip", callback_data: `s:${idsStr}` }],
-      [{ text: "✏️ Edit", callback_data: `e:${idsStr}` },
-       { text: "🫥 Spoiler", callback_data: `sp1:${idsStr}` }],
-    ] } });
+    { reply_markup: controlKeyboard(idsStr) });
   await mutatePending(env, chatId, (pending) => {
     delete pending[firstId];
     pending[String(ids[0])] = {

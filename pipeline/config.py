@@ -27,6 +27,7 @@ DEFAULT_POSTS_PER_DIGEST = 3
 #   promo         — set of ids that claimed the early-access month
 #   state:<id>    — JSON per-user state (pending previews, last run)
 #   feedback:<id> — list of JSON ✅/❌ verdicts, oldest first
+#   sched         — hash <chatId>:<controlId> → JSON scheduled-publish job
 UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "")
 

@@ -78,11 +78,13 @@ def media_refs(msgs: list[dict]) -> list[dict]:
 def send_controls(chat_id: int, content_ids: list[int], label: str) -> None:
     """Send the approve/skip buttons referencing the content message ids."""
     ids = ",".join(map(str, content_ids))
+    # Mirrors controlKeyboard in worker/worker.js — keep the two in sync.
     keyboard = {"inline_keyboard": [
         [{"text": "✅ Post", "callback_data": f"p:{ids}"},
-         {"text": "❌ Skip", "callback_data": f"s:{ids}"}],
-        [{"text": "✏️ Edit", "callback_data": f"e:{ids}"},
-         {"text": "🫥 Spoiler", "callback_data": f"sp1:{ids}"}],
+         {"text": "🕐 Schedule", "callback_data": f"sc:{ids}"}],
+        [{"text": "❌ Skip", "callback_data": f"s:{ids}"},
+         {"text": "✏️ Edit", "callback_data": f"e:{ids}"}],
+        [{"text": "🫥 Spoiler", "callback_data": f"sp1:{ids}"}],
     ]}
     call("sendMessage", chat_id=chat_id, text=label[:4096],
          parse_mode="HTML",
