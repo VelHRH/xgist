@@ -1,5 +1,6 @@
 """Make downloaded media Telegram-ready (bot uploads are capped at ~50 MB)."""
 
+import json
 import logging
 import subprocess
 from pathlib import Path
@@ -31,6 +32,31 @@ def prepare(paths: list[str]) -> list[tuple[str, str]]:
         else:
             log.info("skipping unsupported media %s", path)
     return out
+
+
+def video_meta(path: str) -> dict:
+    """Probe width/height/duration — without them Telegram clients (mobile
+    especially) guess the aspect ratio and render the video stretched."""
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height:format=duration",
+        "-of", "json", str(path),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=60)
+        info = json.loads(proc.stdout or b"{}")
+        stream = (info.get("streams") or [{}])[0]
+        meta = {}
+        if stream.get("width") and stream.get("height"):
+            meta["width"] = stream["width"]
+            meta["height"] = stream["height"]
+        duration = (info.get("format") or {}).get("duration")
+        if duration:
+            meta["duration"] = int(float(duration))
+        return meta
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError) as exc:
+        log.warning("ffprobe failed for %s: %s", path, exc)
+        return {}
 
 
 def _compress(path: Path) -> Path | None:

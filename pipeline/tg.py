@@ -5,6 +5,7 @@ import json
 import requests
 
 from .config import TELEGRAM_BOT_TOKEN
+from .media import video_meta
 
 
 def call(method: str, files=None, **params):
@@ -29,9 +30,11 @@ def send_preview(chat_id: int, media: list[tuple[str, str]], caption: str) -> li
     if len(media) == 1:
         kind, path = media[0]
         method = "sendPhoto" if kind == "photo" else "sendVideo"
+        extra = {"supports_streaming": True, **video_meta(path)} if kind == "video" else {}
         with open(path, "rb") as fh:
             msg = call(method, files={kind: fh},
-                       chat_id=chat_id, caption=caption[:1024], parse_mode="HTML")
+                       chat_id=chat_id, caption=caption[:1024], parse_mode="HTML",
+                       **extra)
         return [msg]
 
     handles, input_media = [], []
@@ -40,6 +43,8 @@ def send_preview(chat_id: int, media: list[tuple[str, str]], caption: str) -> li
             fh = open(path, "rb")
             handles.append(fh)
             item = {"type": kind, "media": f"attach://m{i}"}
+            if kind == "video":
+                item.update(supports_streaming=True, **video_meta(path))
             if i == 0:
                 item["caption"] = caption[:1024]
                 item["parse_mode"] = "HTML"
