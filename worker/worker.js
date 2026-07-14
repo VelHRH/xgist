@@ -1,14 +1,18 @@
 /**
  * Cloudflare Worker: Telegram webhook for the X→Telegram digest bot.
  *
- * Handles user commands (config stored as users.json in the GitHub repo)
- * and the ✅ Post button (copies the approved preview into the user's channel).
+ * Handles user commands (config stored in Upstash Redis, shared with the
+ * GitHub Actions pipeline) and the ✅ Post button (copies the approved
+ * preview into the user's channel).
  *
  * Secrets to set on the Worker (Settings → Variables → Secrets):
  *   BOT_TOKEN       — from @BotFather
- *   GH_TOKEN        — fine-grained GitHub PAT, Contents read/write on the repo
+ *   GH_TOKEN        — fine-grained GitHub PAT, Actions read/write on the repo
+ *                     (used only to dispatch the digest workflow)
  *   GH_REPO         — "owner/repo"
  *   WEBHOOK_SECRET  — any random string; also passed to setWebhook
+ *   UPSTASH_REDIS_REST_URL   — from the Upstash console (REST API section)
+ *   UPSTASH_REDIS_REST_TOKEN — ditto
  *
  * Plain variables (not secret):
  *   BOT_USERNAME    — bot username without @, used by the landing page CTA
@@ -74,35 +78,29 @@ function hasPaidPro(user) {
 }
 
 // Early-access gift: the first PROMO_SLOTS users to /start get a free month
-// of Pro. Grant ids are tracked in config.promo so slots are never reused.
+// of Pro. Grant ids are tracked in the "promo" Redis set so slots are never
+// reused (SADD returning 0 means this id already claimed one).
 const PROMO_SLOTS = 50;
 
 async function maybeGrantPromo(env, chatId) {
   const id = String(chatId);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const { config, sha } = await loadConfig(env);
-    config.users ||= {};
-    const promo = (config.promo ||= []);
-    const user = config.users[id];
-    if (promo.includes(id) || promo.length >= PROMO_SLOTS) return false;
-    if ((config.whitelist || []).includes(id) || hasPaidPro(user)) return false;
-    const entry = (config.users[id] ||= userDefaults());
+  try {
+    if ((await redis(env, "SCARD", "promo")) >= PROMO_SLOTS) return false;
+    const user = await loadUser(env, chatId);
+    if (hasPaidPro(user) || (await isWhitelisted(env, chatId))) return false;
+    if ((await redis(env, "SADD", "promo", id)) !== 1) return false;
+    const entry = user || userDefaults();
     entry.paid_until = new Date(Date.now() + 30 * 86400 * 1000).toISOString();
-    promo.push(id);
-    try {
-      await saveConfig(env, config, sha);
-      return true;
-    } catch (err) {
-      if (attempt === 1) console.log("promo grant failed:", err);
-    }
+    await saveUser(env, chatId, entry);
+    return true;
+  } catch (err) {
+    console.log("promo grant failed:", err);
+    return false;
   }
-  return false;
 }
 
-function limitsFor(config, chatId, isAdmin) {
-  const pro = isAdmin
-    || (config.whitelist || []).includes(String(chatId))
-    || hasPaidPro(config.users?.[String(chatId)]);
+async function limitsFor(env, chatId, user, isAdmin) {
+  const pro = isAdmin || hasPaidPro(user) || (await isWhitelisted(env, chatId));
   return LIMITS[pro ? "pro" : "free"];
 }
 
@@ -273,80 +271,61 @@ function formatCaption(text) {
 // (wrong) Telegram profile link.
 const xlink = (h) => `<a href="https://x.com/${h}">@${h}</a>`;
 
-/* ---------------- GitHub-backed config ---------------- */
+/* ---------------- Redis-backed storage (Upstash) ----------------
+ * Keys, shared with pipeline/config.py — keep the two in sync:
+ *   user:<id>     — JSON user config (channel, sources, hours, editing, …)
+ *   uids          — set of registered user ids
+ *   whitelist     — set of ids with free Pro
+ *   promo         — set of ids that claimed the early-access month
+ *   state:<id>    — JSON per-user pipeline state (pending previews, last run)
+ *   feedback:<id> — list of JSON ✅/❌ verdicts, oldest first, trimmed to 30
+ */
 
-function ghHeaders(env) {
-  return {
-    authorization: `Bearer ${env.GH_TOKEN}`,
-    accept: "application/vnd.github+json",
-    "user-agent": "xdigest-worker",
-  };
+async function redis(env, ...cmd) {
+  const resp = await fetch(env.UPSTASH_REDIS_REST_URL, {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.UPSTASH_REDIS_REST_TOKEN}` },
+    body: JSON.stringify(cmd),
+  });
+  const data = await resp.json();
+  if (data.error) throw new Error(`redis ${cmd[0]} failed: ${data.error}`);
+  return data.result;
 }
 
-function b64encode(str) {
-  const bytes = new TextEncoder().encode(str);
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin);
+async function getJson(env, key) {
+  const raw = await redis(env, "GET", key);
+  return raw ? JSON.parse(raw) : null;
 }
 
-function b64decode(b64) {
-  const bin = atob(b64.replace(/\n/g, ""));
-  return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+const setJson = (env, key, value) =>
+  redis(env, "SET", key, JSON.stringify(value));
+
+const loadUser = (env, chatId) => getJson(env, `user:${chatId}`);
+
+async function saveUser(env, chatId, user) {
+  await setJson(env, `user:${chatId}`, user);
+  await redis(env, "SADD", "uids", String(chatId));
 }
 
-async function ghGetJson(env, path) {
-  const resp = await fetch(
-    `https://api.github.com/repos/${env.GH_REPO}/contents/${path}`,
-    { headers: ghHeaders(env) },
-  );
-  if (resp.status === 404) return null;
-  if (!resp.ok) throw new Error(`${path} load failed: ${resp.status}`);
-  const file = await resp.json();
-  return { data: JSON.parse(b64decode(file.content)), sha: file.sha };
-}
+const isWhitelisted = async (env, chatId) =>
+  (await redis(env, "SISMEMBER", "whitelist", String(chatId))) === 1;
 
-async function ghPutJson(env, path, data, sha) {
-  const body = {
-    message: `bot: update ${path}`,
-    content: b64encode(JSON.stringify(data, null, 2) + "\n"),
-  };
-  if (sha) body.sha = sha;
-  const resp = await fetch(
-    `https://api.github.com/repos/${env.GH_REPO}/contents/${path}`,
-    { method: "PUT", headers: ghHeaders(env), body: JSON.stringify(body) },
-  );
-  return resp.ok;
-}
-
-async function loadConfig(env) {
-  const file = await ghGetJson(env, "users.json");
-  if (!file) throw new Error("users.json missing");
-  return { config: file.data, sha: file.sha };
-}
-
-async function saveConfig(env, config, sha) {
-  if (!(await ghPutJson(env, "users.json", config, sha))) {
-    throw new Error("config save failed");
-  }
-}
+/** The user's pending previews map ({firstMessageId: {source, text, media,
+ *  caption}}), written by the pipeline right after it sends a digest. */
+const loadPending = async (env, chatId) =>
+  (await getJson(env, `state:${chatId}`))?.pending ?? null;
 
 /** Log a ✅/❌ verdict so the ranking model learns the owner's taste. */
 async function recordFeedback(env, chatId, idsStr, verdict) {
   if (!idsStr) return; // previews sent by older versions carry no ids on Skip
   const firstId = idsStr.split(",")[0];
   try {
-    const st = await ghGetJson(env, "state.json");
-    const pending = st?.data?.users?.[String(chatId)]?.pending?.[firstId];
-    if (!pending) return;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const fb = await ghGetJson(env, "feedback.json");
-      const data = fb?.data || { users: {} };
-      const list = (data.users[String(chatId)] ||= []);
-      list.push({ verdict, source: pending.source, text: pending.text });
-      while (list.length > 30) list.shift();
-      if (await ghPutJson(env, "feedback.json", data, fb?.sha)) return;
-    }
+    const entry = (await loadPending(env, chatId))?.[firstId];
+    if (!entry) return;
+    const key = `feedback:${chatId}`;
+    await redis(env, "RPUSH", key,
+      JSON.stringify({ verdict, source: entry.source, text: entry.text }));
+    await redis(env, "LTRIM", key, -30, -1);
   } catch (err) {
     console.log("feedback record failed:", err);
   }
@@ -354,41 +333,48 @@ async function recordFeedback(env, chatId, idsStr, verdict) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Read-modify-write the user's pending previews in state.json, retrying on
- *  sha conflicts (concurrent webhook updates, digest commits). The callback
+/** Read-modify-write the user's pending previews in state:<id>. The callback
  *  gets the pending map; return false to abort without saving. */
 async function mutatePending(env, chatId, mutate) {
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const st = await ghGetJson(env, "state.json");
-      const pending = st?.data?.users?.[String(chatId)]?.pending;
-      if (!pending) return false;
-      if (mutate(pending) === false) return false;
-      if (await ghPutJson(env, "state.json", st.data, st.sha)) return true;
+      const key = `state:${chatId}`;
+      const state = (await getJson(env, key)) || {};
+      if (!state.pending) return false;
+      if (mutate(state.pending) === false) return false;
+      await setJson(env, key, state);
+      return true;
     } catch (err) {
       console.log("state save attempt failed:", err);
     }
-    await sleep(300 + Math.random() * 700);
+    await sleep(300);
   }
   return false;
 }
 
-/** Set (or clear, with null) the user's pending-✏️-edit marker in users.json. */
+/** Set (or clear, with null) the user's pending-✏️-edit marker. */
 async function setEditing(env, chatId, value) {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const { config, sha } = await loadConfig(env);
-      const user = config.users?.[String(chatId)];
-      if (!user) return false;
-      if (value) user.editing = value;
-      else delete user.editing;
-      await saveConfig(env, config, sha);
-      return true;
-    } catch (err) {
-      if (attempt === 2) console.log("editing flag save failed:", err);
-    }
+  try {
+    const user = await loadUser(env, chatId);
+    if (!user) return false;
+    if (value) user.editing = value;
+    else delete user.editing;
+    await saveUser(env, chatId, user);
+    return true;
+  } catch (err) {
+    console.log("editing flag save failed:", err);
+    return false;
   }
-  return false;
+}
+
+/* ---------------- GitHub (workflow dispatch only) ---------------- */
+
+function ghHeaders(env) {
+  return {
+    authorization: `Bearer ${env.GH_TOKEN}`,
+    accept: "application/vnd.github+json",
+    "user-agent": "xdigest-worker",
+  };
 }
 
 /* ---------------- Commands ---------------- */
@@ -440,7 +426,7 @@ async function handleMessage(msg, env, ctx) {
   if (!commandish && (msg.text || msg.caption || msg.photo || msg.video)) {
     let editing = null;
     try {
-      editing = (await loadConfig(env)).config.users?.[String(chatId)]?.editing;
+      editing = (await loadUser(env, chatId))?.editing;
     } catch (err) {
       console.log("config load failed:", err);
     }
@@ -493,9 +479,8 @@ async function handleMessage(msg, env, ctx) {
 
     case "/pro":
     case "/upgrade": {
-      const { config } = await loadConfig(env);
-      const u = config.users?.[String(chatId)];
-      if (isAdmin || (config.whitelist || []).includes(String(chatId))) {
+      const u = await loadUser(env, chatId);
+      if (isAdmin || (await isWhitelisted(env, chatId))) {
         return reply(env, chatId, "You already have Pro (courtesy of the house 🎩)");
       }
       if (hasPaidPro(u)) {
@@ -534,8 +519,7 @@ async function handleMessage(msg, env, ctx) {
           "Usage: /channel @yourchannel\n(or forward me a message from a private channel)");
       }
       const value = arg.startsWith("@") ? arg : Number(arg);
-      const { config } = await loadConfig(env);
-      const u0 = config.users?.[String(chatId)];
+      const u0 = await loadUser(env, chatId);
       return setField(env, chatId, (u) => { u.channel = value; },
         `📢 Channel set to ${esc(arg)}. Make sure I'm an admin there with "Post messages" permission.` +
         setupHints({ channel: value, sources: u0?.sources }));
@@ -545,9 +529,9 @@ async function handleMessage(msg, env, ctx) {
       const handles = arg.split(/[,\s@]+/).map((h) => h.toLowerCase())
         .filter((h) => /^[a-z0-9_]{1,15}$/.test(h));
       if (!handles.length) return reply(env, chatId, "Usage: /add @naval @pmarca");
-      const { config } = await loadConfig(env);
-      const max = limitsFor(config, chatId, isAdmin).sources;
-      const current = config.users?.[String(chatId)]?.sources || [];
+      const u0 = await loadUser(env, chatId);
+      const max = (await limitsFor(env, chatId, u0, isAdmin)).sources;
+      const current = u0?.sources || [];
       const merged = [...new Set([...current, ...handles])];
       if (merged.length > max) {
         return reply(env, chatId,
@@ -557,7 +541,7 @@ async function handleMessage(msg, env, ctx) {
       return setField(env, chatId, (u) => {
         u.sources = [...new Set([...u.sources, ...handles])].slice(0, max);
       }, `👀 Now watching: ${handles.map(xlink).join(", ")}` +
-         setupHints({ channel: config.users?.[String(chatId)]?.channel, sources: merged }));
+         setupHints({ channel: u0?.channel, sources: merged }));
     }
 
     case "/remove": {
@@ -568,8 +552,7 @@ async function handleMessage(msg, env, ctx) {
     }
 
     case "/list": {
-      const { config } = await loadConfig(env);
-      const u = config.users[String(chatId)];
+      const u = await loadUser(env, chatId);
       return reply(env, chatId,
         u?.sources?.length
           ? "👀 You're watching:\n" + u.sources.map(xlink).join("\n")
@@ -584,14 +567,13 @@ async function handleMessage(msg, env, ctx) {
         return reply(env, chatId,
           "Usage: /schedule 9,18 — the hours (0-23) when you want your digest, in your timezone");
       }
-      const { config } = await loadConfig(env);
-      const max = limitsFor(config, chatId, isAdmin).hours;
+      const u0 = await loadUser(env, chatId);
+      const max = (await limitsFor(env, chatId, u0, isAdmin)).hours;
       if (hours.length > max) {
         return reply(env, chatId,
           `Your plan includes up to ${max} digest time(s) per day. ` +
           `Pro gives you ${LIMITS.pro.hours} — /pro`);
       }
-      const u0 = config.users?.[String(chatId)];
       return setField(env, chatId, (u) => { u.hours = hours; },
         `🕘 Digest schedule: ${hours.map((h) => String(h).padStart(2, "0") + ":00").join(", ")} (your timezone)` +
         setupHints({ channel: u0?.channel, sources: u0?.sources }));
@@ -632,10 +614,9 @@ async function handleMessage(msg, env, ctx) {
         arg ? "✍️ Caption style saved." : "✍️ Caption style reset to default.");
 
     case "/settings": {
-      const { config } = await loadConfig(env);
-      const u = config.users[String(chatId)] || userDefaults();
+      const u = (await loadUser(env, chatId)) || userDefaults();
       const paid = hasPaidPro(u);
-      const pro = isAdmin || paid || (config.whitelist || []).includes(String(chatId));
+      const pro = isAdmin || paid || (await isWhitelisted(env, chatId));
       const langNames = { en: "English", uk: "Ukrainian", ru: "Russian" };
       const lines = [
         "⚙️ <b>Your setup</b>",
@@ -662,17 +643,20 @@ async function handleMessage(msg, env, ctx) {
           `Usage: ${cmd} 123456789\n(the user can get their numeric id with /id)`);
       }
       const adding = cmd === "/whitelist";
-      return mutateConfig(env, chatId, (config) => {
-        const list = new Set(config.whitelist || []);
-        adding ? list.add(arg) : list.delete(arg);
-        config.whitelist = [...list].sort();
-      }, adding ? `Whitelisted ${arg} — they now have pro limits.` : `Removed ${arg} from the whitelist.`);
+      try {
+        await redis(env, adding ? "SADD" : "SREM", "whitelist", arg);
+      } catch (err) {
+        console.log("whitelist update failed:", err);
+        return reply(env, chatId, "Storage hiccup, please try again.");
+      }
+      return reply(env, chatId, adding
+        ? `Whitelisted ${arg} — they now have pro limits.`
+        : `Removed ${arg} from the whitelist.`);
     }
 
     case "/whitelisted": {
       if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
-      const { config } = await loadConfig(env);
-      const list = config.whitelist || [];
+      const list = ((await redis(env, "SMEMBERS", "whitelist")) || []).sort();
       return reply(env, chatId, list.length ? list.join("\n") : "Whitelist is empty.");
     }
 
@@ -699,13 +683,18 @@ async function handleMessage(msg, env, ctx) {
 
     case "/users": {
       if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
-      const { config } = await loadConfig(env);
-      const lines = Object.entries(config.users || {}).map(([id, u]) => {
+      const ids = ((await redis(env, "SMEMBERS", "uids")) || []).sort();
+      if (!ids.length) return reply(env, chatId, "No users yet.");
+      const raws = await redis(env, "MGET", ...ids.map((id) => `user:${id}`));
+      const wl = new Set((await redis(env, "SMEMBERS", "whitelist")) || []);
+      const lines = ids.flatMap((id, i) => {
+        if (!raws[i]) return [];
+        const u = JSON.parse(raws[i]);
         const plan = hasPaidPro(u)
           ? `⭐ paid until ${u.paid_until.slice(0, 10)}`
-          : (config.whitelist || []).includes(id) ? "⭐ whitelisted" : "🆓 free";
+          : wl.has(id) ? "⭐ whitelisted" : "🆓 free";
         return `${id} → ${esc(String(u.channel || "no channel"))}, ` +
-               `${u.sources.length} sources, ${(u.hours || []).length} time(s)/day · ${plan}`;
+               `${(u.sources || []).length} sources, ${(u.hours || []).length} time(s)/day · ${plan}`;
       });
       return reply(env, chatId, lines.length ? lines.join("\n") : "No users yet.");
     }
@@ -715,40 +704,15 @@ async function handleMessage(msg, env, ctx) {
   }
 }
 
-/** Mutate top-level config (whitelist etc.) with one retry on sha conflicts. */
-async function mutateConfig(env, chatId, mutate, confirmation) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const { config, sha } = await loadConfig(env);
-    config.users ||= {};
-    mutate(config);
-    try {
-      await saveConfig(env, config, sha);
-      return reply(env, chatId, confirmation);
-    } catch (err) {
-      if (attempt === 1) {
-        console.log("config save failed twice:", err);
-        return reply(env, chatId, "Storage hiccup, please try again.");
-      }
-    }
-  }
-}
-
 async function setField(env, chatId, mutate, confirmation) {
-  // One retry in case of a concurrent commit (sha conflict).
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const { config, sha } = await loadConfig(env);
-    config.users ||= {};
-    const user = (config.users[String(chatId)] ||= userDefaults());
+  try {
+    const user = (await loadUser(env, chatId)) || userDefaults();
     mutate(user);
-    try {
-      await saveConfig(env, config, sha);
-      return reply(env, chatId, confirmation);
-    } catch (err) {
-      if (attempt === 1) {
-        console.log("config save failed twice:", err);
-        return reply(env, chatId, "Storage hiccup, please try again.");
-      }
-    }
+    await saveUser(env, chatId, user);
+    return reply(env, chatId, confirmation);
+  } catch (err) {
+    console.log("config save failed:", err);
+    return reply(env, chatId, "Storage hiccup, please try again.");
   }
 }
 
@@ -768,15 +732,14 @@ async function handleCallback(cb, env) {
     const firstId = idsStr.split(",")[0];
     let entry = null;
     try {
-      const st = await ghGetJson(env, "state.json");
-      entry = st?.data?.users?.[String(chatId)]?.pending?.[firstId];
+      entry = (await loadPending(env, chatId))?.[firstId];
     } catch (err) {
       console.log("state load failed:", err);
     }
     if (!entry || (!entry.media?.length && !entry.caption)) {
-      // Either a pre-spoiler-era preview, or the digest run hasn't
-      // committed state.json yet (it lands ~a minute after the previews).
-      return answer("Preview data isn't synced yet — try again in a minute.", true);
+      // Either a pre-spoiler-era preview, or the digest run hasn't saved
+      // this user's state yet (it lands seconds after the previews).
+      return answer("Preview data isn't synced yet — try again in a moment.", true);
     }
     const veiled = (t) => `<tg-spoiler>${esc(t)}</tg-spoiler>`;
     if (entry.media?.length) {
@@ -817,13 +780,12 @@ async function handleCallback(cb, env) {
     const ids = cb.data.slice(2).split(",").map(Number);
     let entry = null;
     try {
-      const st = await ghGetJson(env, "state.json");
-      entry = st?.data?.users?.[String(chatId)]?.pending?.[String(ids[0])];
+      entry = (await loadPending(env, chatId))?.[String(ids[0])];
     } catch (err) {
       console.log("state load failed:", err);
     }
     if (!entry) {
-      return answer("Preview data isn't synced yet — try again in a minute.", true);
+      return answer("Preview data isn't synced yet — try again in a moment.", true);
     }
     const prompt = [];
     if (entry.caption) {
@@ -851,7 +813,7 @@ async function handleCallback(cb, env) {
 
   if (cb.data === "ec") {
     try {
-      const editing = (await loadConfig(env)).config.users?.[String(chatId)]?.editing;
+      const editing = (await loadUser(env, chatId))?.editing;
       for (const id of editing?.prompt || []) {
         await tg(env, "deleteMessage", { chat_id: chatId, message_id: id });
       }
@@ -871,8 +833,7 @@ async function handleCallback(cb, env) {
 
   if (cb.data.startsWith("p:")) {
     const ids = cb.data.slice(2).split(",").map(Number).sort((a, b) => a - b);
-    const { config } = await loadConfig(env);
-    const user = config.users?.[String(chatId)];
+    const user = await loadUser(env, chatId);
     if (!user?.channel) return answer("Set your channel first: /channel @name", true);
 
     // Future non-Telegram targets (e.g. Instagram) would branch here into a
@@ -906,8 +867,7 @@ async function handleEditContent(msg, editing, env, ctx) {
   const firstId = String(editing.ids[0]);
   let entry = null;
   try {
-    const st = await ghGetJson(env, "state.json");
-    entry = st?.data?.users?.[String(chatId)]?.pending?.[firstId];
+    entry = (await loadPending(env, chatId))?.[firstId];
   } catch (err) {
     console.log("state load failed:", err);
   }
@@ -939,8 +899,8 @@ async function handleEditContent(msg, editing, env, ctx) {
   }
 
   // Album: Telegram delivers each photo as a separate update. Stage them in
-  // state.json; after a pause, the update holding the highest message_id
-  // rebuilds the preview with everything collected.
+  // the pending entry; after a pause, the update holding the highest
+  // message_id rebuilds the preview with everything collected.
   const group = msg.media_group_id;
   await mutatePending(env, chatId, (pending) => {
     const e = pending[firstId];
@@ -951,8 +911,7 @@ async function handleEditContent(msg, editing, env, ctx) {
   });
   const work = (async () => {
     await sleep(3000);
-    const st = await ghGetJson(env, "state.json");
-    const e = st?.data?.users?.[String(chatId)]?.pending?.[firstId];
+    const e = (await loadPending(env, chatId))?.[firstId];
     const staged = e?.staged;
     if (!staged || staged.group !== group) return;
     if (Math.max(...staged.items.map((i) => i.mid)) !== msg.message_id) return;
@@ -1006,7 +965,7 @@ async function applyRebuild(env, chatId, editing, entry, firstId, items, caption
   const idsStr = ids.join(",");
   let channel = null;
   try {
-    channel = (await loadConfig(env)).config.users?.[String(chatId)]?.channel;
+    channel = (await loadUser(env, chatId))?.channel;
   } catch (err) {
     console.log("config load failed:", err);
   }

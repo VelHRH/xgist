@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from . import tg
 from .caption import make_caption
 from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, TMP_DIR, load_feedback,
-                     load_state, load_users, load_whitelist, save_state)
+                     load_state, load_users, load_whitelist, save_user_state)
 from .fetch import AuthError, fetch_source
 from .media import prepare
 from .rank import engagement, pick_top
@@ -215,8 +215,10 @@ def main() -> None:
             slots.get(uid) if not force_user else None
         ) or now.astimezone(tz).strftime("%Y-%m-%d %H")
         user_state["last_digest_at"] = now.isoformat()
+        # Save right away so the Worker sees this user's pending previews as
+        # soon as their digest lands, not after every user is processed.
+        save_user_state(uid, user_state)
 
-    save_state(state)
     log.info("done")
 
 

@@ -15,7 +15,9 @@ every hour ──▶ GitHub Actions (free)                 Cloudflare Worker (fr
                                                        user's channel
 ```
 
-- **GitHub repo** = code + user "database" (`users.json`, `state.json`)
+- **GitHub repo** = code only
+- **Upstash Redis (free tier)** = the database — user configs, pending
+  previews, ✅/❌ feedback — shared by the Worker and the pipeline
 - **GitHub Actions** = hourly scheduled runner (~1–2 min per run)
 - **Cloudflare Worker** = instant bot command + button handler
 - **Only real cost:** Claude API captions/ranking, roughly $0.5–2/month
@@ -53,7 +55,18 @@ git push -u origin main
    and export cookies for x.com in Netscape format.
 3. Keep the file's **content** handy for the next step. Never commit it.
 
-### 4. Add GitHub secrets
+### 4. Create the free Upstash Redis database
+
+All bot data (user configs, pending previews, feedback history) lives in a
+free Upstash Redis database, reachable over plain HTTPS from both the Worker
+and GitHub Actions.
+
+1. [console.upstash.com](https://console.upstash.com) → Redis → **Create
+   Database** (free tier; pick a region close to you).
+2. On the database page, open the **REST API** section and copy
+   `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`.
+
+### 5. Add GitHub secrets
 
 Repo → Settings → Secrets and variables → Actions → **New repository secret**:
 
@@ -62,31 +75,33 @@ Repo → Settings → Secrets and variables → Actions → **New repository sec
 | `TELEGRAM_BOT_TOKEN` | from BotFather |
 | `ANTHROPIC_API_KEY` | from console.anthropic.com → API keys |
 | `TWITTER_COOKIES` | full content of the exported cookies.txt |
+| `UPSTASH_REDIS_REST_URL` | from step 4 |
+| `UPSTASH_REDIS_REST_TOKEN` | from step 4 |
 
 Optionally, under *Variables*, set `DEFAULT_TZ` (default is `Europe/Kyiv`).
 
-### 5. Create a GitHub token for the Worker
+### 6. Create a GitHub token for the Worker
 
-The Worker needs to read/write `users.json` in your repo.
+The Worker triggers the digest workflow (hourly cron and `/gen_digest_now`).
 
 1. GitHub → Settings (your profile) → Developer settings →
    **Fine-grained personal access tokens** → Generate new token.
 2. Repository access: *Only select repositories* → your repo.
-3. Permissions → Repository permissions → **Contents: Read and write**
-   and **Actions: Read and write** (the second one lets the bot's
-   `/gen_digest_now` admin command trigger a run).
+3. Permissions → Repository permissions → **Actions: Read and write**.
 4. Save the token — this is `GH_TOKEN`.
 
-### 6. Deploy the Cloudflare Worker
+### 7. Deploy the Cloudflare Worker
 
 1. dash.cloudflare.com → Workers & Pages → **Create Worker** → deploy the
    hello-world, then **Edit code**, replace everything with
    [`worker/worker.js`](worker/worker.js), **Deploy**.
-2. Worker → Settings → Variables and Secrets → add four **secrets**:
+2. Worker → Settings → Variables and Secrets → add six **secrets**:
    - `BOT_TOKEN` — the BotFather token
-   - `GH_TOKEN` — from step 5
+   - `GH_TOKEN` — from step 6
    - `GH_REPO` — e.g. `YOURNAME/xdigest`
    - `WEBHOOK_SECRET` — any random string you invent (e.g. from a password generator)
+   - `UPSTASH_REDIS_REST_URL` — from step 4
+   - `UPSTASH_REDIS_REST_TOKEN` — from step 4
 3. Add plain **variables** (not secrets):
    - `BOT_USERNAME` — your bot's username without the `@` (used by the landing page button)
    - `ADMIN_USERNAME` — your Telegram username without `@` (e.g. `velhrh`) —
@@ -106,7 +121,7 @@ talks to the same URL via POST. For serious SEO later, attach a custom domain
 to the Worker (Cloudflare → Worker → Settings → Domains & Routes) — domains
 rank; `workers.dev` subdomains rank poorly.
 
-### 7. Point Telegram at the Worker
+### 8. Point Telegram at the Worker
 
 Run this once in any terminal (or paste into the browser address bar after
 replacing the placeholders):
@@ -122,7 +137,7 @@ once — this registers the bot's "/" command autocomplete menu in Telegram
 (re-open it after ever changing the command list, or after setting `ADMIN_ID`
 to also get admin commands in your autocomplete).
 
-### 8. Configure yourself as the first user
+### 9. Configure yourself as the first user
 
 1. Create your Telegram channel (or use an existing one).
 2. Channel → Administrators → add your bot with **Post messages** permission.
@@ -137,7 +152,7 @@ to also get admin commands in your autocomplete).
 /style short summaries in Ukrainian, no emoji
 ```
 
-### 9. Test it
+### 10. Test it
 
 Repo → Actions → **Digest** → Run workflow → tick **force** → Run. Within a
 couple of minutes the bot should message you previews. Tap ✅ and check your
@@ -156,8 +171,9 @@ See `/help` in the bot. Summary: `/channel`, `/add`, `/remove`, `/list`,
 ## How multiple users work
 
 Anyone who talks to the bot can configure their own sources, hours and
-channel — configs live in `users.json`, one entry per Telegram user. Sources
-are fetched once per run regardless of how many users watch them.
+channel — configs live in Upstash Redis (`user:<id>`, one entry per Telegram
+user; the full key schema is documented in `pipeline/config.py`). Sources are
+fetched once per run regardless of how many users watch them.
 
 **Plans:** free users get 1 digest time/day and 5 sources; Pro users get
 6 times/day and 25 sources (the `LIMITS` table in `worker/worker.js`,
@@ -201,6 +217,7 @@ Graph API.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 export TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=... FORCE_ALL=1
+export UPSTASH_REDIS_REST_URL=... UPSTASH_REDIS_REST_TOKEN=...
 cp ~/Downloads/x.com_cookies.txt cookies.txt
 python -m pipeline.digest
 ```

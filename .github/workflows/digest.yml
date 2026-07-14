@@ -19,7 +19,7 @@ on:
         default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: digest
@@ -45,21 +45,10 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TWITTER_COOKIES: ${{ secrets.TWITTER_COOKIES }}
           TWITTER_USERNAME: ${{ secrets.TWITTER_USERNAME }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
           ADMIN_ID: ${{ vars.ADMIN_ID }}
           FORCE_ALL: ${{ inputs.force == true && '1' || '' }}
           FORCE_USER: ${{ inputs.only_user }}
           DEFAULT_TZ: ${{ vars.DEFAULT_TZ || 'Europe/Kyiv' }}
         run: python -m pipeline.digest
-
-      - name: Save state
-        run: |
-          git config user.name "digest-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add state.json
-          git diff --cached --quiet && exit 0
-          git commit -m "state: digest run"
-          for i in 1 2 3; do
-            git push && exit 0
-            git pull --rebase
-          done
-          git push

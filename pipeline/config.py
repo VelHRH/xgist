@@ -2,9 +2,9 @@ import json
 import os
 from pathlib import Path
 
+import requests
+
 ROOT = Path(__file__).resolve().parent.parent
-USERS_FILE = ROOT / "users.json"
-STATE_FILE = ROOT / "state.json"
 TMP_DIR = ROOT / "tmp"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -19,35 +19,71 @@ FETCH_RANGE = int(os.getenv("FETCH_RANGE", "30"))
 SHORTLIST_SIZE = int(os.getenv("SHORTLIST_SIZE", "12"))
 DEFAULT_POSTS_PER_DIGEST = 3
 
+# Upstash Redis REST API — the shared store between this pipeline and the
+# Cloudflare Worker. Keys (keep in sync with worker/worker.js):
+#   user:<id>     — JSON user config
+#   uids          — set of registered user ids
+#   whitelist     — set of ids with free Pro
+#   promo         — set of ids that claimed the early-access month
+#   state:<id>    — JSON per-user state (pending previews, last run)
+#   feedback:<id> — list of JSON ✅/❌ verdicts, oldest first
+UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").rstrip("/")
+UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "")
 
-def _load_json(path: Path, fallback: dict) -> dict:
-    if not path.exists():
-        return fallback
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return fallback
+_HEADERS = {"Authorization": f"Bearer {UPSTASH_TOKEN}"}
+
+
+def _redis(*cmd):
+    resp = requests.post(UPSTASH_URL, json=list(cmd), headers=_HEADERS, timeout=20)
+    data = resp.json()
+    if isinstance(data, dict) and data.get("error"):
+        raise RuntimeError(f"redis {cmd[0]} failed: {data['error']}")
+    return data["result"]
+
+
+def _redis_pipeline(commands: list[list]) -> list:
+    if not commands:
+        return []
+    resp = requests.post(f"{UPSTASH_URL}/pipeline", json=commands,
+                         headers=_HEADERS, timeout=30)
+    results = []
+    for cmd, item in zip(commands, resp.json()):
+        if "error" in item:
+            raise RuntimeError(f"redis {cmd[0]} failed: {item['error']}")
+        results.append(item["result"])
+    return results
+
+
+def _uids() -> list[str]:
+    return sorted(_redis("SMEMBERS", "uids") or [])
+
+
+def _mget_json(prefix: str) -> dict:
+    uids = _uids()
+    if not uids:
+        return {}
+    raws = _redis("MGET", *[f"{prefix}:{uid}" for uid in uids])
+    return {uid: json.loads(raw) for uid, raw in zip(uids, raws) if raw}
 
 
 def load_users() -> dict:
-    return _load_json(USERS_FILE, {"users": {}}).get("users", {})
+    return _mget_json("user")
 
 
 def load_whitelist() -> list:
-    return _load_json(USERS_FILE, {"users": {}}).get("whitelist", [])
+    return _redis("SMEMBERS", "whitelist") or []
 
 
 def load_state() -> dict:
-    return _load_json(STATE_FILE, {"users": {}}).get("users", {})
+    return _mget_json("state")
 
 
 def load_feedback() -> dict:
-    """Approve/skip history written by the Worker (feedback.json)."""
-    return _load_json(ROOT / "feedback.json", {"users": {}}).get("users", {})
+    """Approve/skip history written by the Worker (feedback:<id> lists)."""
+    uids = _uids()
+    rows = _redis_pipeline([["LRANGE", f"feedback:{uid}", "0", "-1"] for uid in uids])
+    return {uid: [json.loads(r) for r in row] for uid, row in zip(uids, rows) if row}
 
 
-def save_state(users_state: dict) -> None:
-    STATE_FILE.write_text(
-        json.dumps({"users": users_state}, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+def save_user_state(uid: str, user_state: dict) -> None:
+    _redis("SET", f"state:{uid}", json.dumps(user_state, ensure_ascii=False))
