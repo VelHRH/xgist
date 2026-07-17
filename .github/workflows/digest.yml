@@ -39,6 +39,11 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      # ubuntu-latest no longer ships ffmpeg; media.py needs ffprobe for
+      # video width/height/duration and ffmpeg to compress >48 MB videos.
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
+
       - name: Run digest
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
