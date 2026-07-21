@@ -14,7 +14,8 @@ from zoneinfo import ZoneInfo
 from . import tg
 from .caption import make_caption
 from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, TMP_DIR, load_feedback,
-                     load_state, load_users, load_whitelist, save_user_state)
+                     load_state, load_users, load_whitelist, save_user_state,
+                     should_alert)
 from .fetch import AuthError, fetch_source
 from .media import prepare
 from .rank import engagement, pick_top
@@ -22,26 +23,46 @@ from .rank import engagement, pick_top
 log = logging.getLogger(__name__)
 
 
-def _alert_cookie_expiry() -> None:
+def _alert_admin(text: str) -> None:
     import json
     import urllib.request
     admin_id = os.getenv("ADMIN_ID", "").strip()
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    log.warning("X session invalid — cookies likely expired")
     if not (admin_id and token):
         return
     try:
         urllib.request.urlopen(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            data=json.dumps({"chat_id": admin_id, "text": (
-                "⚠️ XGist: X cookies expired — digests paused.\n\n"
-                "Re-export cookies.txt from your browser and update "
-                "TWITTER_COOKIES in GitHub Secrets."
-            )}).encode(),
+            data=json.dumps({"chat_id": admin_id, "text": text}).encode(),
             timeout=10,
         )
     except Exception as exc:
-        log.error("failed to send cookie-expiry alert: %s", exc)
+        log.error("failed to send admin alert: %s", exc)
+
+
+def _alert_cookie_expiry() -> None:
+    log.warning("X session invalid — cookies likely expired")
+    _alert_admin(
+        "⚠️ XGist: X cookies expired — digests paused.\n\n"
+        "Re-export cookies.txt from your browser and update "
+        "TWITTER_COOKIES in GitHub Secrets."
+    )
+
+
+def _alert_fetch_broken(sources: int) -> None:
+    """Every source resolved but returned nothing — X likely changed its
+    web bundle and twscrape can't build the transaction-id header. Distinct
+    from cookie expiry (which raises AuthError first)."""
+    log.warning("fetch returned 0 tweets across all %d sources", sources)
+    # Once per 6h so every due slot across the day doesn't re-ping.
+    if should_alert("fetch_broken", 6 * 3600):
+        _alert_admin(
+            "🛑 XGist: fetched all sources but got 0 tweets — X scraping is "
+            "broken (likely a twscrape XClientTxId breakage after an X "
+            "change), so digests are silently empty.\n\n"
+            "Check https://github.com/vladkens/twscrape/issues for a fix "
+            "release, then bump the pin in requirements.txt."
+        )
 
 
 # GitHub's hourly cron fires late or skips slots entirely, so a scheduled
@@ -151,6 +172,14 @@ def main() -> None:
             _alert_cookie_expiry()
             return
         fetched.setdefault(s, [])
+
+    # A quiet account still has *some* recent posts in FETCH_RANGE, so zero
+    # tweets across every source means fetching itself is broken, not a slow
+    # news day. Alert and bail without advancing last_run_hour, so the next
+    # slot retries and the digest self-heals once twscrape works again.
+    if sources and not any(fetched.values()):
+        _alert_fetch_broken(len(sources))
+        return
 
     # Each account's typical engagement (median over its fetched sample) —
     # lets a small account's hit compete with a big account's routine post.
