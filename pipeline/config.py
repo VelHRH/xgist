@@ -88,3 +88,16 @@ def load_feedback() -> dict:
 
 def save_user_state(uid: str, user_state: dict) -> None:
     _redis("SET", f"state:{uid}", json.dumps(user_state, ensure_ascii=False))
+
+
+def should_alert(key: str, ttl_seconds: int) -> bool:
+    """Rate-limit admin alerts: True at most once per ttl for a given key.
+
+    Uses SET NX EX so overlapping runs (and every due slot across the day)
+    don't spam the same warning. Fails open — if Redis is unreachable we'd
+    rather send a duplicate alert than swallow it.
+    """
+    try:
+        return _redis("SET", f"alert:{key}", "1", "NX", "EX", ttl_seconds) == "OK"
+    except Exception:
+        return True
