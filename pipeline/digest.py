@@ -31,11 +31,14 @@ def _alert_admin(text: str) -> None:
     if not (admin_id and token):
         return
     try:
-        urllib.request.urlopen(
+        # Telegram rejects the body as 400 unless it's declared JSON — urllib
+        # otherwise defaults to form-urlencoded and the fields don't parse.
+        req = urllib.request.Request(
             f"https://api.telegram.org/bot{token}/sendMessage",
             data=json.dumps({"chat_id": admin_id, "text": text}).encode(),
-            timeout=10,
+            headers={"Content-Type": "application/json"},
         )
+        urllib.request.urlopen(req, timeout=10)
     except Exception as exc:
         log.error("failed to send admin alert: %s", exc)
 
