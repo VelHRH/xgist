@@ -13,10 +13,10 @@ from zoneinfo import ZoneInfo
 
 from . import tg
 from .caption import make_caption
-from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, TMP_DIR, load_feedback,
-                     load_state, load_users, load_whitelist, save_user_state,
-                     should_alert)
-from .fetch import AuthError, fetch_source
+from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, THREAD_MEDIA_CAP, TMP_DIR,
+                     load_feedback, load_state, load_users, load_whitelist,
+                     refund_thread_quota, save_user_state, should_alert)
+from .fetch import AuthError, fetch_source, fetch_thread
 from .media import prepare
 from .rank import engagement, pick_top
 
@@ -139,8 +139,91 @@ def _window_start(user_state: dict, now: datetime) -> datetime:
     return floor
 
 
+# Cap on stored pending previews per user — the Worker looks these up by the
+# preview's first message id when the user taps a control.
+PENDING_CAP = 40
+
+
+def _record_pending(user_state: dict, content_ids: list[int], *,
+                    source: str, text: str, caption: str, refs: list) -> None:
+    """Remember a sent preview so the Worker can log the user's ✅/❌ verdict
+    for future ranking and re-edit the media/caption for the 🫥 spoiler toggle.
+    Keyed by the first content message id; oldest entries drop past PENDING_CAP.
+    Shared by the Digest loop and the thread flow so their limits stay in sync."""
+    pending = user_state.setdefault("pending", {})
+    pending[str(content_ids[0])] = {
+        "source": source,
+        "text": text[:280],
+        "media": refs,
+        "caption": caption[:1024] if refs else caption[:4096],
+    }
+    while len(pending) > PENDING_CAP:
+        pending.pop(next(iter(pending)))
+
+
+def run_thread(thread_url: str) -> None:
+    """On-demand flow: build a single Thread-post Preview from a pasted link
+    and append it to the target user's pending previews, without touching any
+    Digest scheduling state. The target chat id rides in on FORCE_USER, the
+    same input the Digest uses to run for one user. On a failed fetch the
+    user's quota charge is refunded so the failure costs them nothing."""
+    uid = os.getenv("FORCE_USER", "").strip()
+    if not uid:
+        log.error("THREAD_URL set but no target user (FORCE_USER) — nothing to do")
+        return
+    cfg = load_users().get(uid)
+    if cfg is None:
+        log.error("thread target %s is not a registered user", uid)
+        return
+
+    if TMP_DIR.exists():
+        shutil.rmtree(TMP_DIR)
+
+    try:
+        thread = fetch_thread(thread_url)
+    except Exception:
+        log.exception("thread fetch failed for user %s (%s) — refunding quota",
+                      uid, thread_url)
+        try:
+            refund_thread_quota(uid)
+        except Exception:
+            log.exception("quota refund failed for user %s", uid)
+        return
+
+    media = prepare(thread["media"], limit=THREAD_MEDIA_CAP)
+    if not media and not thread["text"]:
+        log.warning("thread %s has neither media nor text — skipping", thread_url)
+        return
+
+    caption = make_caption(thread, cfg)
+    msgs = tg.send_preview(int(uid), media, caption)
+    content_ids = [m["message_id"] for m in msgs]
+    dest = cfg["channel"] if isinstance(cfg.get("channel"), str) else "your channel"
+    tg.send_controls(
+        int(uid), content_ids,
+        f'<a href="https://x.com/{thread["source"]}/status/{thread["id"]}">'
+        f'@{thread["source"]}</a>'
+        f" · ❤️ {thread['favorites']} · 🔁 {thread['retweets']} · 🧵"
+        f"\nPublish to {dest}?",
+    )
+
+    # Append to this user's pending previews only — leave last_run_hour,
+    # proposed and last_digest_at (the Digest's scheduling state) untouched.
+    user_state = load_state().get(uid, {})
+    _record_pending(user_state, content_ids, source=thread["source"],
+                    text=thread["text"], caption=caption, refs=tg.media_refs(msgs))
+    save_user_state(uid, user_state)
+    log.info("thread preview delivered to user %s", uid)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    thread_url = os.getenv("THREAD_URL", "").strip()
+    if thread_url:
+        run_thread(thread_url)
+        return
+
     now = datetime.now(timezone.utc)
     whitelist = load_whitelist()
     users = {uid: _apply_plan(uid, cfg, whitelist, now)
@@ -214,7 +297,7 @@ def main() -> None:
                 caption = make_caption(tweet, cfg)
                 msgs = tg.send_preview(int(uid), media, caption)
                 content_ids = [m["message_id"] for m in msgs]
-                dest = cfg["channel"] if isinstance(cfg["channel"], str) else "your channel"
+                dest = cfg["channel"] if isinstance(cfg.get("channel"), str) else "your channel"
                 tg.send_controls(
                     int(uid), content_ids,
                     f'<a href="https://x.com/{tweet["source"]}/status/{tweet["id"]}">'
@@ -222,19 +305,9 @@ def main() -> None:
                     f" · ❤️ {tweet['favorites']} · 🔁 {tweet['retweets']}"
                     f"\nPublish to {dest}?",
                 )
-                # Remember what this preview was about so the Worker can log
-                # the user's ✅/❌ verdict for future ranking, and re-edit the
-                # preview (media file_ids + caption) for the 🫥 spoiler toggle.
-                refs = tg.media_refs(msgs)
-                pending = user_state.setdefault("pending", {})
-                pending[str(content_ids[0])] = {
-                    "source": tweet["source"],
-                    "text": tweet["text"][:280],
-                    "media": refs,
-                    "caption": caption[:1024] if refs else caption[:4096],
-                }
-                while len(pending) > 40:
-                    pending.pop(next(iter(pending)))
+                _record_pending(user_state, content_ids, source=tweet["source"],
+                                text=tweet["text"], caption=caption,
+                                refs=tg.media_refs(msgs))
                 proposed = user_state.setdefault("proposed", [])
                 proposed.append(tweet["id"])
                 del proposed[:-200]

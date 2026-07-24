@@ -286,6 +286,8 @@ const xlink = (h) => `<a href="https://x.com/${h}">@${h}</a>`;
  *   state:<id>    — JSON per-user pipeline state (pending previews, last run)
  *   feedback:<id> — list of JSON ✅/❌ verdicts, oldest first, trimmed to 30
  *   sched         — hash <chatId>:<controlId> → JSON scheduled-publish job
+ *   quota:<id>    — thread-post charges in the rolling 24h window; INCR before
+ *                   dispatching a thread fetch, DECR'd by the pipeline on failure
  */
 
 async function redis(env, ...cmd) {

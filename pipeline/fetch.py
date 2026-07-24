@@ -8,7 +8,8 @@ from pathlib import Path
 import requests
 import twscrape
 
-from .config import FETCH_RANGE, TMP_DIR
+from .config import FETCH_RANGE, THREAD_MEDIA_CAP, TMP_DIR
+from .thread import build_chain, parse_tweet_id
 
 log = logging.getLogger(__name__)
 
@@ -166,3 +167,77 @@ def fetch_source(handle: str) -> list[dict]:
     except Exception as exc:
         log.error("fetch_source failed for @%s: %s", handle, exc)
         return []
+
+
+def _thread_tweet_dict(tw: "twscrape.Tweet") -> dict:
+    """A tweet dict for thread assembly. `_media` carries the twscrape media
+    object for later download; build_chain never reads it (it stays a pure
+    function over id/author/in_reply_to/date)."""
+    return {
+        "id": tw.id_str,
+        "author": (tw.user.username if tw.user else "").lstrip("@"),
+        "text": tw.rawContent or "",
+        "date": tw.date,
+        "favorites": tw.likeCount or 0,
+        "retweets": tw.retweetCount or 0,
+        "in_reply_to": tw.inReplyToTweetIdStr,
+        "_media": tw.media,
+    }
+
+
+async def _fetch_thread_async(url: str) -> dict:
+    tid = parse_tweet_id(url)
+    if not tid:
+        raise ValueError(f"not a tweet URL: {url!r}")
+    api = await _get_api()
+
+    linked = await api.tweet_details(int(tid))
+    if linked is None:
+        raise RuntimeError(f"tweet {tid} not found (deleted, protected, or invalid)")
+
+    # tweet_details gives us the linked tweet; tweet_thread fills in the rest of
+    # the conversation so build_chain can walk the author's self-reply chain.
+    pool: dict[str, dict] = {}
+    linked_d = _thread_tweet_dict(linked)
+    pool[linked_d["id"]] = linked_d
+    try:
+        async for tw in api.tweet_thread(int(tid), limit=-1):
+            d = _thread_tweet_dict(tw)
+            pool.setdefault(d["id"], d)
+    except Exception as exc:
+        # A partial thread still yields a usable chain around the linked tweet.
+        log.warning("tweet_thread incomplete for %s: %s", tid, exc)
+
+    chain = build_chain(pool, linked_d["id"])
+    root = chain[0]
+    author = linked_d["author"]
+
+    # Gather media across the chain in thread order, capped at THREAD_MEDIA_CAP.
+    dest = TMP_DIR / f"thread_{tid}"
+    dest.mkdir(parents=True, exist_ok=True)
+    media_paths: list[str] = []
+    for t in chain:
+        if t.get("_media"):
+            media_paths += _download_media(t["id"], t["_media"], dest, _cookie_str)
+        if len(media_paths) >= THREAD_MEDIA_CAP:
+            break
+    media_paths = media_paths[:THREAD_MEDIA_CAP]
+
+    text = "\n\n".join(t["text"] for t in chain if t["text"]).strip()
+    return {
+        "id": root["id"],
+        "source": author,
+        "text": text,
+        "favorites": root["favorites"],
+        "retweets": root["retweets"],
+        "media": media_paths,
+    }
+
+
+def fetch_thread(url: str) -> dict:
+    """Resolve a tweet link into a single thread-post dict: the author's
+    self-reply chain concatenated (`text`), its media gathered in order
+    (`media`, capped), and the root tweet's id/handle/engagement for the
+    control line. Raises on any failure (invalid/deleted tweet, scraper
+    outage) so the caller can refund the user's quota."""
+    return asyncio.get_event_loop().run_until_complete(_fetch_thread_async(url))

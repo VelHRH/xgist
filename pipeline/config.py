@@ -18,6 +18,9 @@ FETCH_RANGE = int(os.getenv("FETCH_RANGE", "30"))
 # How many candidates go to Claude for ranking.
 SHORTLIST_SIZE = int(os.getenv("SHORTLIST_SIZE", "12"))
 DEFAULT_POSTS_PER_DIGEST = 3
+# Media items to attach to a thread-post Preview (Telegram albums hold 10;
+# higher than a Digest preview, which stays light).
+THREAD_MEDIA_CAP = 10
 
 # Upstash Redis REST API — the shared store between this pipeline and the
 # Cloudflare Worker. Keys (keep in sync with worker/worker.js):
@@ -28,6 +31,8 @@ DEFAULT_POSTS_PER_DIGEST = 3
 #   state:<id>    — JSON per-user state (pending previews, last run)
 #   feedback:<id> — list of JSON ✅/❌ verdicts, oldest first
 #   sched         — hash <chatId>:<controlId> → JSON scheduled-publish job
+#   quota:<id>    — thread-post charges in the rolling 24h window; the Worker
+#                   INCRs before dispatching, the pipeline DECRs on failed fetch
 UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "")
 
@@ -88,6 +93,16 @@ def load_feedback() -> dict:
 
 def save_user_state(uid: str, user_state: dict) -> None:
     _redis("SET", f"state:{uid}", json.dumps(user_state, ensure_ascii=False))
+
+
+def refund_thread_quota(uid: str) -> None:
+    """Undo one thread-post quota charge after a failed fetch, so the failure
+    costs the user nothing. The Worker charges quota:<id> before dispatching
+    (see issue #6); this is the matching refund. Clamped at 0 so a race can't
+    drive the counter negative, and KEEPTTL preserves the rolling window."""
+    remaining = _redis("DECR", f"quota:{uid}")
+    if isinstance(remaining, int) and remaining < 0:
+        _redis("SET", f"quota:{uid}", "0", "KEEPTTL")
 
 
 def should_alert(key: str, ttl_seconds: int) -> bool:
