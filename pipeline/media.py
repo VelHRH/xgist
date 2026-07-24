@@ -12,10 +12,13 @@ PHOTO_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXT = {".mp4", ".mov", ".m4v"}
 
 
-def prepare(paths: list[str]) -> list[tuple[str, str]]:
-    """Return a list of (kind, path) pairs, kind in {'photo', 'video'}."""
+def prepare(paths: list[str], limit: int = 4) -> list[tuple[str, str]]:
+    """Return a list of (kind, path) pairs, kind in {'photo', 'video'}.
+
+    Digest previews stay light (limit 4); thread posts pass the album max (10).
+    """
     out: list[tuple[str, str]] = []
-    for raw in paths[:4]:  # Telegram albums hold up to 10, but keep previews light
+    for raw in paths[:limit]:
         path = Path(raw)
         ext = path.suffix.lower()
         if ext in PHOTO_EXT:
