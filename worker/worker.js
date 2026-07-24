@@ -279,7 +279,8 @@ const xlink = (h) => `<a href="https://x.com/${h}">@${h}</a>`;
 
 /* ---------------- Redis-backed storage (Upstash) ----------------
  * Keys, shared with pipeline/config.py — keep the two in sync:
- *   user:<id>     — JSON user config (channel, sources, hours, editing, …)
+ *   user:<id>     — JSON user config (channel, sources, hours, editing, paused, …)
+ *                   paused: bool — when set, the digest skips this user (no fetch)
  *   uids          — set of registered user ids
  *   whitelist     — set of ids with free Pro
  *   promo         — set of ids that claimed the early-access month
@@ -388,7 +389,40 @@ function ghHeaders(env) {
 
 function userDefaults() {
   return { channel: null, sources: [], hours: [9], timezone: null,
-           limit: 3, interests: null, style: null, language: "en" };
+           limit: 3, interests: null, style: null, language: "en", paused: false };
+}
+
+/** The /settings body + its inline pause/resume toggle. Shared between the
+ *  /settings command and the toggle callback so both render identically and
+ *  the callback can edit the message in place. */
+async function settingsView(env, chatId, isAdmin) {
+  const u = (await loadUser(env, chatId)) || userDefaults();
+  const paid = hasPaidPro(u);
+  const pro = isAdmin || paid || (await isWhitelisted(env, chatId));
+  const langNames = { en: "English", uk: "Ukrainian", ru: "Russian" };
+  const paused = !!u.paused;
+  const lines = [
+    "⚙️ <b>Your setup</b>",
+    "",
+    `📢 Channel: ${u.channel ? esc(String(u.channel)) : "not set — /channel @yourchannel"}`,
+    `👀 Watching: ${u.sources?.length ? u.sources.map(xlink).join(", ") : "nobody — /add @naval"}`,
+    `🕘 Schedule: ${(u.hours || []).map((h) => String(h).padStart(2, "0") + ":00").join(", ")}`,
+    `🌍 Timezone: ${u.timezone ? esc(u.timezone) : "Europe/Kyiv (default)"}`,
+    `🌐 Language: ${langNames[u.language || "en"]}`,
+    `✍️ Style: ${u.style ? esc(u.style) : "default"}`,
+    `🔢 Posts per digest: ${u.limit}`,
+    pro
+      ? (paid ? `⭐ Plan: Pro until ${u.paid_until.slice(0, 10)}` : "⭐ Plan: Pro")
+      : "🆓 Plan: free — upgrade with /pro",
+    paused ? "⏸ Digest: Paused" : "▶️ Digest: Active",
+  ];
+  return {
+    text: lines.join("\n"),
+    reply_markup: { inline_keyboard: [[
+      { text: paused ? "▶️ Resume digests" : "⏸ Pause digests",
+        callback_data: "pt" },
+    ]] },
+  };
 }
 
 async function handleMessage(msg, env, ctx) {
@@ -621,25 +655,8 @@ async function handleMessage(msg, env, ctx) {
         arg ? "✍️ Caption style saved." : "✍️ Caption style reset to default.");
 
     case "/settings": {
-      const u = (await loadUser(env, chatId)) || userDefaults();
-      const paid = hasPaidPro(u);
-      const pro = isAdmin || paid || (await isWhitelisted(env, chatId));
-      const langNames = { en: "English", uk: "Ukrainian", ru: "Russian" };
-      const lines = [
-        "⚙️ <b>Your setup</b>",
-        "",
-        `📢 Channel: ${u.channel ? esc(String(u.channel)) : "not set — /channel @yourchannel"}`,
-        `👀 Watching: ${u.sources?.length ? u.sources.map(xlink).join(", ") : "nobody — /add @naval"}`,
-        `🕘 Schedule: ${(u.hours || []).map((h) => String(h).padStart(2, "0") + ":00").join(", ")}`,
-        `🌍 Timezone: ${u.timezone ? esc(u.timezone) : "Europe/Kyiv (default)"}`,
-        `🌐 Language: ${langNames[u.language || "en"]}`,
-        `✍️ Style: ${u.style ? esc(u.style) : "default"}`,
-        `🔢 Posts per digest: ${u.limit}`,
-        pro
-          ? (paid ? `⭐ Plan: Pro until ${u.paid_until.slice(0, 10)}` : "⭐ Plan: Pro")
-          : "🆓 Plan: free — upgrade with /pro",
-      ];
-      return reply(env, chatId, lines.join("\n"));
+      const view = await settingsView(env, chatId, isAdmin);
+      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
     }
 
     case "/whitelist":
@@ -830,6 +847,35 @@ async function handleCallback(cb, env) {
     });
     if (!ok) return answer("Storage hiccup — tap ✏️ Edit again.", true);
     return answer("");
+  }
+
+  // ⏸/▶️ pause toggle from /settings: flip the user's `paused` flag and
+  // re-render the settings message in place (button label + status line).
+  // A paused user is skipped by the digest before any fetch (pipeline side).
+  if (cb.data === "pt") {
+    let paused;
+    try {
+      const user = (await loadUser(env, chatId)) || userDefaults();
+      user.paused = !user.paused;
+      paused = user.paused;
+      await saveUser(env, chatId, user);
+    } catch (err) {
+      console.log("pause toggle failed:", err);
+      return answer("Storage hiccup — try again.", true);
+    }
+    // The flag is already saved; a failed re-render shouldn't leave the
+    // button spinning, so guard the edit and still answer the callback.
+    try {
+      const view = await settingsView(env, chatId, isAdminUser(cb.from, env));
+      await tg(env, "editMessageText", {
+        chat_id: chatId, message_id: controlId, text: view.text,
+        parse_mode: "HTML", link_preview_options: { is_disabled: true },
+        reply_markup: view.reply_markup,
+      });
+    } catch (err) {
+      console.log("settings re-render failed:", err);
+    }
+    return answer(paused ? "Digests paused" : "Digests resumed");
   }
 
   if (cb.data === "ec") {

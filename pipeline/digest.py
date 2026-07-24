@@ -75,6 +75,8 @@ CATCH_UP_HOURS = 2
 
 def _due_slot(cfg: dict, user_state: dict, now: datetime) -> str | None:
     """Return the "YYYY-MM-DD HH" slot this run should serve, or None."""
+    if cfg.get("paused"):
+        return None
     if not cfg.get("channel") or not cfg.get("sources"):
         return None
     try:

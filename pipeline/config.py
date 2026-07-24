@@ -21,7 +21,8 @@ DEFAULT_POSTS_PER_DIGEST = 3
 
 # Upstash Redis REST API — the shared store between this pipeline and the
 # Cloudflare Worker. Keys (keep in sync with worker/worker.js):
-#   user:<id>     — JSON user config
+#   user:<id>     — JSON user config (channel, sources, hours, paused, …)
+#                   paused: bool — when set, the digest skips this user (no fetch)
 #   uids          — set of registered user ids
 #   whitelist     — set of ids with free Pro
 #   promo         — set of ids that claimed the early-access month
