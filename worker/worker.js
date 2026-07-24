@@ -38,6 +38,8 @@ Setup — 3 steps:
 
 At those hours you'll get previews here. Tap ✅ Post — it's in your channel. Tap ❌ Skip — nobody ever sees it. Tap ✏️ Edit to rewrite the text or swap the images before posting. Tap 🫥 Spoiler to blur the media and text. Tap 🕐 Schedule to publish at a later hour instead of right away.
 
+🧵 Post a specific thread: paste any X link here and I'll build a Preview from the whole self-reply chain — same buttons, straight to your channel (1/day free · 5 with Pro).
+
 Fine-tuning:
 🌐 /lang en | uk | ru — post language (default: en)
 ✍️ /post_style short, witty, no emoji — how to write captions
