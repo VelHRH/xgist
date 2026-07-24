@@ -62,9 +62,20 @@ Admin:
 // Free vs pro limits. Whitelisted users (and the admin) get pro; later,
 // paying users plug into the same check.
 const LIMITS = {
-  free: { sources: 5, hours: 1 },
-  pro: { sources: 25, hours: 6 },
+  free: { sources: 5, hours: 1, thread_posts: 1 },
+  pro: { sources: 25, hours: 6, thread_posts: 5 },
 };
+
+// A tweet permalink anywhere in a DM triggers a thread post. Tolerates
+// www./mobile./m. subdomains, x.com or twitter.com, and any query/fragment
+// suffix; captures the whole URL (the pipeline re-parses the numeric id).
+const TWEET_URL_RE =
+  /(?:https?:\/\/)?(?:www\.|mobile\.|m\.)?(?:twitter|x)\.com\/[^/\s]+\/status\/\d+/i;
+
+function firstTweetUrl(text) {
+  const m = String(text || "").match(TWEET_URL_RE);
+  return m ? m[0] : null;
+}
 
 function isAdminUser(from, env) {
   if (!from) return false;
@@ -146,14 +157,7 @@ export default {
   // each run via workflow_dispatch — those execute promptly and reliably.
   async scheduled(event, env, ctx) {
     ctx.waitUntil(Promise.all([
-      fetch(
-        `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/digest.yml/dispatches`,
-        {
-          method: "POST",
-          headers: ghHeaders(env),
-          body: JSON.stringify({ ref: "main", inputs: {} }),
-        },
-      ).then(async (resp) => {
+      dispatchDigest(env, {}).then(async (resp) => {
         if (resp.status !== 204) {
           console.log("cron dispatch failed:", resp.status, await resp.text());
         }
@@ -387,6 +391,20 @@ function ghHeaders(env) {
   };
 }
 
+/** Kick the digest workflow with the given inputs (cron: {}, one-user digest:
+ *  {only_user}, thread post: {thread_url, only_user}). Returns the fetch
+ *  Response so each caller can handle status !== 204 its own way. */
+function dispatchDigest(env, inputs) {
+  return fetch(
+    `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/digest.yml/dispatches`,
+    {
+      method: "POST",
+      headers: ghHeaders(env),
+      body: JSON.stringify({ ref: "main", inputs }),
+    },
+  );
+}
+
 /* ---------------- Commands ---------------- */
 
 function userDefaults() {
@@ -425,6 +443,57 @@ async function settingsView(env, chatId, isAdmin) {
         callback_data: "pt" },
     ]] },
   };
+}
+
+// Rolling-24h thread-post quota, charged in quota:<id> (mirrored in
+// pipeline/config.py, which DECRs it if the fetch fails). Charge-then-check so
+// two quick pastes can't both slip under the cap; refund here if we reject or
+// the dispatch fails, and let the pipeline refund a failed *fetch*.
+async function handleThreadLink(env, chatId, from, url) {
+  const isAdmin = isAdminUser(from, env);
+  let user = null;
+  try {
+    user = await loadUser(env, chatId);
+  } catch (err) {
+    console.log("thread: user load failed:", err);
+  }
+  const pro = isAdmin || hasPaidPro(user) || (await isWhitelisted(env, chatId));
+  const limit = isAdmin ? Infinity : LIMITS[pro ? "pro" : "free"].thread_posts;
+
+  let used;
+  try {
+    used = await redis(env, "INCR", `quota:${chatId}`);
+    if (used === 1) await redis(env, "EXPIRE", `quota:${chatId}`, 86400);
+  } catch (err) {
+    console.log("thread: quota charge failed:", err);
+    return reply(env, chatId, "Storage hiccup, please try again.");
+  }
+
+  const refund = async () => {
+    try {
+      await redis(env, "DECR", `quota:${chatId}`);
+    } catch (err) {
+      console.log("thread: quota refund failed:", err);
+    }
+  };
+
+  if (used > limit) {
+    await refund();
+    return reply(env, chatId,
+      `🧵 That's today's thread limit (${limit}/day). It resets within 24h` +
+      (pro ? "." : ` — or /pro for ${LIMITS.pro.thread_posts}/day.`));
+  }
+
+  const resp = await dispatchDigest(env,
+    { thread_url: url, only_user: String(chatId) });
+  if (resp.status !== 204) {
+    const detail = await resp.text();
+    console.log("thread dispatch failed:", resp.status, detail);
+    await refund();
+    return reply(env, chatId,
+      `Couldn't start the thread fetch (HTTP ${resp.status}). Please try again.`);
+  }
+  return reply(env, chatId, "🧵 Fetching that thread — preview in ~1–2 min.");
 }
 
 async function handleMessage(msg, env, ctx) {
@@ -466,16 +535,29 @@ async function handleMessage(msg, env, ctx) {
   // content: text replaces the caption, attached photos replace all media.
   const commandish =
     !!msg.text && (MENU_BUTTONS[msg.text.trim()] || msg.text.trim()).startsWith("/");
+  let editLoadFailed = false;
   if (!commandish && (msg.text || msg.caption || msg.photo || msg.video)) {
     let editing = null;
     try {
       editing = (await loadUser(env, chatId))?.editing;
     } catch (err) {
       console.log("config load failed:", err);
+      editLoadFailed = true;
     }
     if (editing && editing.until > Date.now()) {
       return handleEditContent(msg, editing, env, ctx);
     }
+  }
+
+  // Paste-a-link → thread post. Deliberately after the ✏️-edit capture above
+  // (a link pasted mid-Edit is edit content, not a new thread) and before the
+  // command switch. Skipped for commands so "/foo …x.com/…/status/…" isn't
+  // hijacked; a plain message that merely contains a tweet link triggers it.
+  // If the edit-state load above failed we can't tell a mid-Edit paste from a
+  // fresh link, so we don't trigger (and don't charge quota) on a hiccup.
+  if (!commandish && !editLoadFailed) {
+    const tweetUrl = firstTweetUrl(msg.text || msg.caption);
+    if (tweetUrl) return handleThreadLink(env, chatId, msg.from, tweetUrl);
   }
 
   if (!msg.text) return;
@@ -688,14 +770,7 @@ async function handleMessage(msg, env, ctx) {
 
     case "/gen_digest_now": {
       if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
-      const resp = await fetch(
-        `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/digest.yml/dispatches`,
-        {
-          method: "POST",
-          headers: ghHeaders(env),
-          body: JSON.stringify({ ref: "main", inputs: { only_user: String(chatId) } }),
-        },
-      );
+      const resp = await dispatchDigest(env, { only_user: String(chatId) });
       if (resp.status !== 204) {
         const detail = await resp.text();
         console.log("dispatch failed:", resp.status, detail);

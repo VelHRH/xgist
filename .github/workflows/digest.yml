@@ -26,7 +26,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: digest
+  # On-demand thread fetches run in their own per-user group so a Preview never
+  # queues behind the hourly Digest (and two threads for one user serialize).
+  group: ${{ github.event.inputs.thread_url && format('thread-{0}', github.event.inputs.only_user) || 'digest' }}
   cancel-in-progress: false
 
 jobs:
