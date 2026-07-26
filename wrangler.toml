@@ -1,0 +1,22 @@
+# Cloudflare Worker deploy config for the XGist Telegram bot.
+#
+# Used by `wrangler deploy` (see .github/workflows/deploy-worker.yml), which
+# runs on pushes to main that touch worker/**. Manual dashboard paste (README
+# step 7) still works — this only adds an automated path on top of it.
+#
+# The six Worker *secrets* (BOT_TOKEN, GH_TOKEN, GH_REPO, WEBHOOK_SECRET,
+# UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN) live in the Cloudflare
+# Dashboard and are NOT managed here — wrangler preserves existing secrets.
+#
+# keep_vars = true stops wrangler from wiping the dashboard-configured *plain*
+# variables (BOT_USERNAME, ADMIN_USERNAME, ADMIN_ID, PRO_PRICE_STARS); without
+# it, a deploy would clear them and break the landing-page CTA / admin commands.
+#
+# No [triggers] block on purpose: omitting crons leaves the dashboard-set cron
+# (0 * * * *) untouched — only an explicit empty crons array disables it. Same
+# for routes / custom domains, which stay dashboard-managed.
+
+name = "xgist"
+main = "worker/worker.js"
+compatibility_date = "2025-07-01"
+keep_vars = true
