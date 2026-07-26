@@ -115,6 +115,28 @@ The Worker triggers the digest workflow (hourly cron and `/gen_digest_now`).
    in `digest.yml` is kept only as a fallback).
 5. Copy the worker URL (like `https://xdigest.YOURNAME.workers.dev`).
 
+**Auto-deploy (optional).** With the dashboard paste above you have to re-paste
+`worker/worker.js` every time it changes. To have pushes to `main` deploy the
+Worker for you (via [`.github/workflows/deploy-worker.yml`](.github/workflows/deploy-worker.yml)
+and [`wrangler.toml`](wrangler.toml)):
+
+1. Cloudflare → My Profile → **API Tokens** → Create Token → *Edit Cloudflare
+   Workers* template (or a token with the **Workers Scripts: Edit** permission).
+2. GitHub → your repo → Settings → Secrets and variables → **Actions**, and add
+   two **repository secrets**:
+   - `CLOUDFLARE_API_TOKEN` — the token from step 1
+   - `CLOUDFLARE_ACCOUNT_ID` — Cloudflare dashboard → Workers & Pages (shown in
+     the right sidebar / any worker's URL)
+3. If your Worker isn't named `xgist`, add a repository **variable** (same page,
+   *Variables* tab) `CF_WORKER_NAME` set to your Worker's exact name, so deploys
+   update it instead of creating a second Worker.
+
+Now any push to `main` that touches `worker/**` re-deploys the Worker within a
+minute or two. The workflow only manages the code: your dashboard **secrets,
+plain variables, cron trigger, and custom domains are left untouched**. Forks
+without `CLOUDFLARE_API_TOKEN` skip the deploy cleanly (no failed run), so the
+dashboard paste above remains the beginner path.
+
 The worker URL doubles as your **landing page**: opening it in a browser shows
 a SEO-ready product page (with `robots.txt` and `sitemap.xml`), while Telegram
 talks to the same URL via POST. For serious SEO later, attach a custom domain

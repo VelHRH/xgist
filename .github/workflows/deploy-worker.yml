@@ -1,0 +1,50 @@
+name: Deploy Worker
+
+# Auto-deploy the Cloudflare Worker so worker.js changes on main go live
+# without a manual dashboard paste. Only fires when the worker (or its deploy
+# config) changes — pipeline-only pushes are ignored.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker/**"
+      - "wrangler.toml"
+      - ".github/workflows/deploy-worker.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Surfaced as an env var so the steps below can branch on its presence —
+      # secrets can't be referenced directly in `if:` conditions.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      # Forks of this template won't have the Cloudflare secrets. Skip cleanly
+      # (green ✓) instead of failing the push with a red ✗.
+      - name: Skip when Cloudflare secrets are absent
+        if: env.CLOUDFLARE_API_TOKEN == ''
+        run: |
+          echo "CLOUDFLARE_API_TOKEN is not set — skipping wrangler deploy."
+          echo "This is expected on forks; deploy the Worker via the dashboard (README step 7)."
+
+      - uses: actions/checkout@v4
+        if: env.CLOUDFLARE_API_TOKEN != ''
+
+      - name: Deploy Worker
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Override the wrangler.toml name only when CF_WORKER_NAME is set, so
+          # each fork deploys to its own already-existing Worker instead of the
+          # author's. Unset → the "xgist" default in wrangler.toml is used.
+          command: ${{ vars.CF_WORKER_NAME && format('deploy --name {0}', vars.CF_WORKER_NAME) || 'deploy' }}
