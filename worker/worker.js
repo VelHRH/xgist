@@ -104,12 +104,22 @@ async function maybeGrantPromo(env, chatId) {
     if ((await redis(env, "SADD", "promo", id)) !== 1) return false;
     const entry = user || userDefaults();
     entry.paid_until = new Date(Date.now() + 30 * 86400 * 1000).toISOString();
+    delete entry.free_since;
+    delete entry.pro_invite_sent_at;
     await saveUser(env, chatId, entry);
     return true;
   } catch (err) {
     console.log("promo grant failed:", err);
     return false;
   }
+}
+
+async function registerFreeUser(env, chatId) {
+  const user = (await loadUser(env, chatId)) || userDefaults();
+  if (!hasPaidPro(user) && !(await isWhitelisted(env, chatId)) && !user.free_since) {
+    user.free_since = new Date().toISOString();
+  }
+  await saveUser(env, chatId, user);
 }
 
 async function limitsFor(env, chatId, user, isAdmin) {
@@ -165,6 +175,7 @@ export default {
         }
       }),
       publishScheduled(env),
+      sendProInvites(env),
     ]));
   },
 };
@@ -407,6 +418,74 @@ function dispatchDigest(env, inputs) {
   );
 }
 
+async function createProInvoiceLink(env) {
+  const price = Number(env.PRO_PRICE_STARS || 550);
+  const res = await tg(env, "createInvoiceLink", {
+    title: "XGist Pro",
+    description:
+      "Up to 6 digest times per day and 25 watched accounts. " +
+      "Renews monthly, cancel anytime in Telegram settings.",
+    payload: "pro-sub",
+    currency: "XTR",
+    prices: [{ label: "XGist Pro, 30 days", amount: price }],
+    subscription_period: 2592000,
+  });
+  return { price, res };
+}
+
+async function sendProOffer(env, chatId, intro = "") {
+  const { price, res } = await createProInvoiceLink(env);
+  if (!res.ok) return res;
+  return reply(env, chatId,
+    intro +
+    `⭐ <b>XGist Pro</b> — ${price} Stars / month\n` +
+    `6 digest times a day · 25 watched accounts\n` +
+    `Renews automatically; cancel anytime in Telegram Settings → My Stars.`,
+    { reply_markup: { inline_keyboard: [[
+      { text: `⭐ Subscribe — ${price} Stars/mo`, url: res.result },
+    ]] } });
+}
+
+async function sendProInvites(env) {
+  const ids = (await redis(env, "SMEMBERS", "uids")) || [];
+  if (!ids.length) return;
+  const [raws, whitelist] = await Promise.all([
+    redis(env, "MGET", ...ids.map((id) => `user:${id}`)),
+    redis(env, "SMEMBERS", "whitelist"),
+  ]);
+  const whitelisted = new Set(whitelist || []);
+  const now = Date.now();
+  for (let i = 0; i < ids.length; i++) {
+    if (!raws[i]) continue;
+    const id = ids[i];
+    const user = JSON.parse(raws[i]);
+    const pro = String(id) === String(env.ADMIN_ID) ||
+      whitelisted.has(id) || hasPaidPro(user);
+    if (pro) {
+      if (user.free_since || user.pro_invite_sent_at) {
+        delete user.free_since;
+        delete user.pro_invite_sent_at;
+        await saveUser(env, id, user);
+      }
+      continue;
+    }
+    if (!user.free_since) {
+      const expiredAt = Date.parse(user.paid_until);
+      user.free_since = new Date(Number.isFinite(expiredAt) ? expiredAt : now).toISOString();
+      await saveUser(env, id, user);
+    }
+    if (user.pro_invite_sent_at || Date.parse(user.free_since) > now - 86400 * 1000) {
+      continue;
+    }
+    const sent = await sendProOffer(env, id,
+      "Ready for more? Upgrade your free plan and unlock:\n\n");
+    if (sent.ok) {
+      user.pro_invite_sent_at = new Date(now).toISOString();
+      await saveUser(env, id, user);
+    }
+  }
+}
+
 /* ---------------- Commands ---------------- */
 
 function userDefaults() {
@@ -517,7 +596,11 @@ async function handleMessage(msg, env, ctx) {
     const until = sp.subscription_expiration_date
       ? new Date(sp.subscription_expiration_date * 1000)
       : new Date(Date.now() + 31 * 86400 * 1000);
-    await setField(env, chatId, (u) => { u.paid_until = until.toISOString(); },
+    await setField(env, chatId, (u) => {
+      u.paid_until = until.toISOString();
+      delete u.free_since;
+      delete u.pro_invite_sent_at;
+    },
       `⭐ Pro is active until ${until.toISOString().slice(0, 10)}. ` +
       `It renews automatically — manage or cancel anytime in ` +
       `Telegram Settings → My Stars.`);
@@ -583,6 +666,8 @@ async function handleMessage(msg, env, ctx) {
             `🎁 Promo slot used by id ${chatId}` +
             (msg.from.username ? ` (@${esc(msg.from.username)})` : ""));
         }
+      } else if (cmd === "/start" && !isAdmin) {
+        await registerFreeUser(env, chatId);
       }
       return;
     }
@@ -614,30 +699,12 @@ async function handleMessage(msg, env, ctx) {
         return reply(env, chatId,
           `You're already Pro until ${u.paid_until.slice(0, 10)} ⭐`);
       }
-      const price = Number(env.PRO_PRICE_STARS || 550);
-      // Subscription invoices can only be created as links (sendInvoice with
-      // subscription_period fails with SUBSCRIPTION_EXPORT_MISSING).
-      const res = await tg(env, "createInvoiceLink", {
-        title: "XGist Pro",
-        description:
-          "Up to 6 digest times per day and 25 watched accounts. " +
-          "Renews monthly, cancel anytime in Telegram settings.",
-        payload: "pro-sub",
-        currency: "XTR",
-        prices: [{ label: "XGist Pro, 30 days", amount: price }],
-        subscription_period: 2592000,
-      });
+      const res = await sendProOffer(env, chatId);
       if (!res.ok) {
         return reply(env, chatId,
           `Couldn't create the invoice: ${esc(res.description || "unknown error")}`);
       }
-      return reply(env, chatId,
-        `⭐ <b>XGist Pro</b> — ${price} Stars / month\n` +
-        `6 digest times a day · 25 watched accounts\n` +
-        `Renews automatically; cancel anytime in Telegram Settings → My Stars.`,
-        { reply_markup: { inline_keyboard: [[
-          { text: `⭐ Subscribe — ${price} Stars/mo`, url: res.result },
-        ]] } });
+      return res;
     }
 
     case "/channel": {
