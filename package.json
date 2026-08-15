@@ -1,0 +1,9 @@
+{
+  "type": "module",
+  "scripts": {
+    "check": "node --check worker/worker.js",
+    "test": "node worker/worker.test.js",
+    "test:python": "python3 -m unittest discover -s tests",
+    "test:all": "npm test && npm run test:python"
+  }
+}

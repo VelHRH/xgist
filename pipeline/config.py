@@ -81,6 +81,10 @@ def load_whitelist() -> list:
     return _redis("SMEMBERS", "whitelist") or []
 
 
+def load_promo() -> list:
+    return _redis("SMEMBERS", "promo") or []
+
+
 def load_state() -> dict:
     return _mget_json("state")
 

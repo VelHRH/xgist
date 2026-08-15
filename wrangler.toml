@@ -9,7 +9,7 @@
 # Dashboard and are NOT managed here — wrangler preserves existing secrets.
 #
 # keep_vars = true stops wrangler from wiping the dashboard-configured *plain*
-# variables (BOT_USERNAME, ADMIN_USERNAME, ADMIN_ID, PRO_PRICE_STARS); without
+# variables (BOT_USERNAME, ADMIN_ID, PRO_PRICE_STARS); without
 # it, a deploy would clear them and break the landing-page CTA / admin commands.
 #
 # No [triggers] block on purpose: omitting crons leaves the dashboard-set cron
