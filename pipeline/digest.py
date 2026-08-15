@@ -79,7 +79,7 @@ def _due_slot(cfg: dict, user_state: dict, now: datetime) -> str | None:
     """Return the "YYYY-MM-DD HH" slot this run should serve, or None."""
     if cfg.get("paused"):
         return None
-    if not cfg.get("channel") or not cfg.get("sources"):
+    if not cfg.get("sources"):
         return None
     try:
         tz = ZoneInfo(cfg.get("timezone") or DEFAULT_TZ)
@@ -121,6 +121,14 @@ def _window_start(user_state: dict, now: datetime) -> datetime:
 # Cap on stored pending previews per user — the Worker looks these up by the
 # preview's first message id when the user taps a control.
 PENDING_CAP = 40
+
+
+def _publishing_prompt(cfg: dict) -> str:
+    if not cfg.get("channel"):
+        return ("No Publishing channel connected yet.\n"
+                "Tap ✅ Post when you're ready to connect one.")
+    dest = cfg["channel"] if isinstance(cfg["channel"], str) else "your channel"
+    return f"Publish to {dest}?"
 
 
 def _record_pending(user_state: dict, content_ids: list[int], *,
@@ -177,13 +185,12 @@ def run_thread(thread_url: str) -> None:
     caption = make_caption(thread, cfg)
     msgs = tg.send_preview(int(uid), media, caption)
     content_ids = [m["message_id"] for m in msgs]
-    dest = cfg["channel"] if isinstance(cfg.get("channel"), str) else "your channel"
     tg.send_controls(
         int(uid), content_ids,
         f'<a href="https://x.com/{thread["source"]}/status/{thread["id"]}">'
         f'@{thread["source"]}</a>'
         f" · ❤️ {thread['favorites']} · 🔁 {thread['retweets']} · 🧵"
-        f"\nPublish to {dest}?",
+        f"\n{_publishing_prompt(cfg)}",
     )
 
     # Append to this user's pending previews only — leave last_run_hour,
@@ -269,23 +276,39 @@ def main() -> None:
         ]
         log.info("user %s: %d candidates since %s", uid, len(candidates), start)
 
-        sent = 0
+        prepared = []
         ranking_cfg = {**cfg, "_feedback": feedback.get(uid, [])}
         for tweet in pick_top(candidates, ranking_cfg):
             try:
                 media = prepare(tweet["media"])
                 if not media and not tweet["text"]:
                     continue
-                caption = make_caption(tweet, cfg)
+                prepared.append((tweet, media, make_caption(tweet, cfg)))
+            except Exception:
+                log.exception("failed to prepare tweet %s for user %s", tweet["id"], uid)
+
+        if prepared and cfg["_plan"]["tier"] == "pro":
+            count = len(cfg["sources"])
+            try:
+                tg.send_text(
+                    int(uid),
+                    "⭐ <b>XGist Pro</b>\nYour briefing is ready · curated from "
+                    f"{count} watched account{'s' if count != 1 else ''}.",
+                )
+            except Exception:
+                log.exception("failed to send Pro briefing header to user %s", uid)
+
+        sent = 0
+        for tweet, media, caption in prepared:
+            try:
                 msgs = tg.send_preview(int(uid), media, caption)
                 content_ids = [m["message_id"] for m in msgs]
-                dest = cfg["channel"] if isinstance(cfg.get("channel"), str) else "your channel"
                 tg.send_controls(
                     int(uid), content_ids,
                     f'<a href="https://x.com/{tweet["source"]}/status/{tweet["id"]}">'
                     f'@{tweet["source"]}</a>'
                     f" · ❤️ {tweet['favorites']} · 🔁 {tweet['retweets']}"
-                    f"\nPublish to {dest}?",
+                    f"\n{_publishing_prompt(cfg)}",
                 )
                 _record_pending(user_state, content_ids, source=tweet["source"],
                                 text=tweet["text"], caption=caption,
@@ -297,7 +320,20 @@ def main() -> None:
             except Exception:
                 log.exception("failed to preview tweet %s for user %s", tweet["id"], uid)
 
-        if sent == 0 and (cfg.get("notify_empty") or force_user):
+        first_digest = not user_state.get("last_digest_at")
+        if sent == 0 and cfg.get("sources") and first_digest:
+            try:
+                heading = ("⭐ <b>XGist Pro · Your first briefing is complete</b>"
+                           if cfg["_plan"]["tier"] == "pro" else
+                           "✅ <b>Your first briefing is complete</b>")
+                tg.send_text(
+                    int(uid),
+                    heading + "\nNothing strong enough to recommend this time. "
+                    "I'll check again at your next Digest time.",
+                )
+            except Exception:
+                log.exception("failed to notify user %s", uid)
+        elif sent == 0 and (cfg.get("notify_empty") or force_user):
             try:
                 tg.send_text(
                     int(uid),

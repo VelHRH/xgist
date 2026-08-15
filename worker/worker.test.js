@@ -161,6 +161,20 @@ test("free access keeps the existing limits and upgrade action", async () => {
   assert.match(replies[3], /Upgrade with \/pro/);
 });
 
+test("help and setup hints treat the Publishing channel as optional", async () => {
+  const promo = Array.from({ length: 50 }, (_, index) => `promo-${index}`);
+  const harness = createHarness({ promo });
+  await sendUpdate(harness, message(110, "/help"));
+  await sendUpdate(harness, message(110, "/add naval"));
+
+  const replies = sentTo(harness, 110);
+  assert.match(replies[0], /Setup — 2 steps/);
+  assert.match(replies[0], /Optional: \/channel @yourchannel/);
+  assert.match(replies[1], /Now watching/);
+  assert.doesNotMatch(replies[1], /channel/);
+  assert.doesNotMatch(replies[1], /Digests won't start/);
+});
+
 test("paid access is labeled honestly and keeps Pro limits", async () => {
   const paidUntil = new Date(Date.now() + 20 * DAY).toISOString();
   const harness = createHarness({
