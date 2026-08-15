@@ -13,11 +13,13 @@ from zoneinfo import ZoneInfo
 
 from . import tg
 from .caption import make_caption
-from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, THREAD_MEDIA_CAP, TMP_DIR,
-                     load_feedback, load_state, load_users, load_whitelist,
-                     refund_thread_quota, save_user_state, should_alert)
+from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, THREAD_MEDIA_CAP,
+                     TMP_DIR, load_feedback, load_promo, load_state, load_users,
+                     load_whitelist, refund_thread_quota, save_user_state,
+                     should_alert)
 from .fetch import AuthError, fetch_source, fetch_thread
 from .media import prepare
+from .plans import apply_plan, resolve_plan
 from .rank import engagement, pick_top
 
 log = logging.getLogger(__name__)
@@ -95,31 +97,6 @@ def _due_slot(cfg: dict, user_state: dict, now: datetime) -> str | None:
             if key > served:
                 return key
     return None
-
-
-# Mirrors LIMITS in worker/worker.js — keep the two in sync.
-FREE_HOURS = 1
-FREE_SOURCES = 5
-
-
-def _apply_plan(uid: str, cfg: dict, whitelist: list, now: datetime) -> dict:
-    """Clamp a lapsed/free user's config to free-tier limits.
-
-    The Worker enforces limits when settings change; this catches the case
-    where a paid subscription expired after the settings were saved.
-    """
-    paid = False
-    if cfg.get("paid_until"):
-        try:
-            paid = datetime.fromisoformat(cfg["paid_until"]) > now
-        except ValueError:
-            pass
-    if paid or uid in whitelist:
-        return cfg
-    clamped = dict(cfg)
-    clamped["hours"] = (cfg.get("hours") or [9])[:FREE_HOURS]
-    clamped["sources"] = (cfg.get("sources") or [])[:FREE_SOURCES]
-    return clamped
 
 
 # Tweets posted shortly before the previous digest get a second look — their
@@ -228,7 +205,10 @@ def main() -> None:
 
     now = datetime.now(timezone.utc)
     whitelist = load_whitelist()
-    users = {uid: _apply_plan(uid, cfg, whitelist, now)
+    promo = load_promo()
+    admin_id = os.getenv("ADMIN_ID", "").strip()
+    users = {uid: apply_plan(
+                 cfg, resolve_plan(uid, cfg, whitelist, promo, admin_id, now))
              for uid, cfg in load_users().items()}
     state = load_state()
 

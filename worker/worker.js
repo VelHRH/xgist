@@ -16,9 +16,6 @@
  *
  * Plain variables (not secret):
  *   BOT_USERNAME    — bot username without @, used by the landing page CTA
- *   ADMIN_USERNAME  — Telegram username (without @) that gets admin commands
- *   ADMIN_ID        — optional but recommended: admin's numeric Telegram id
- *                     (usernames can be released and re-claimed; ids cannot)
  *   PRO_PRICE_STARS — monthly Pro price in Telegram Stars (default 550)
  *
  * GET requests serve the landing page (plus /robots.txt and /sitemap.xml);
@@ -80,14 +77,89 @@ function firstTweetUrl(text) {
 }
 
 function isAdminUser(from, env) {
-  if (!from) return false;
-  if (env.ADMIN_ID && String(from.id) === String(env.ADMIN_ID)) return true;
-  return !!(env.ADMIN_USERNAME && from.username &&
-    from.username.toLowerCase() === env.ADMIN_USERNAME.replace(/^@/, "").toLowerCase());
+  return !!(from && env.ADMIN_ID && String(from.id) === String(env.ADMIN_ID));
 }
 
-function hasPaidPro(user) {
-  return !!(user?.paid_until && Date.parse(user.paid_until) > Date.now());
+function effectivePlan(user, { isAdmin = false, whitelisted = false,
+                               promotional = false } = {}) {
+  const usage = {
+    sources: (user?.sources || []).length,
+    hours: (user?.hours || []).length,
+  };
+  if (isAdmin) {
+    return { tier: "pro", source: "administrator", expiresAt: null,
+             limits: LIMITS.pro, usage };
+  }
+  const expiresAt = user?.paid_until || null;
+  const active = !!(expiresAt && Date.parse(expiresAt) > Date.now());
+  if (active && user?.pro_source === "paid") {
+    return { tier: "pro", source: "paid", expiresAt,
+             limits: LIMITS.pro, usage };
+  }
+  if (whitelisted) {
+    return { tier: "pro", source: "courtesy", expiresAt: null,
+             limits: LIMITS.pro, usage };
+  }
+  if (active) {
+    const trial = user?.pro_source === "trial" || (!user?.pro_source && promotional);
+    return { tier: "pro", source: trial ? "trial" : "paid", expiresAt,
+             limits: LIMITS.pro, usage };
+  }
+  return { tier: "free", source: "free", expiresAt: null,
+           limits: LIMITS.free, usage };
+}
+
+async function resolvePlan(env, chatId, user) {
+  if (env.ADMIN_ID && String(chatId) === String(env.ADMIN_ID)) {
+    return effectivePlan(user, { isAdmin: true });
+  }
+  const [whitelisted, promotional] = await Promise.all([
+    isWhitelisted(env, chatId),
+    redis(env, "SISMEMBER", "promo", String(chatId)).then((value) => value === 1),
+  ]);
+  return effectivePlan(user, { whitelisted, promotional });
+}
+
+function planPresentation(plan) {
+  if (plan.source === "paid") {
+    return {
+      label: "⭐ <b>XGist Pro</b>",
+      details: `Active until <b>${plan.expiresAt.slice(0, 10)}</b>. ` +
+        "Manage renewal in Telegram Settings → My Stars.",
+    };
+  }
+  if (plan.source === "trial") {
+    const days = Math.max(1,
+      Math.ceil((Date.parse(plan.expiresAt) - Date.now()) / 86400000));
+    return {
+      label: `⭐ <b>XGist Pro Trial · ${days} day${days === 1 ? "" : "s"} left</b>`,
+      details: `Full Pro access is active until <b>${plan.expiresAt.slice(0, 10)}</b>.`,
+    };
+  }
+  if (plan.source === "courtesy") {
+    return {
+      label: "⭐ <b>XGist Pro · Courtesy access</b>",
+      details: "Full Pro access, courtesy of XGist.",
+    };
+  }
+  if (plan.source === "administrator") {
+    return {
+      label: "⭐ <b>XGist Pro · Administrator</b>",
+      details: "Full Pro access for the XGist administrator.",
+    };
+  }
+  return {
+    label: "🆓 <b>XGist Free</b>",
+    details: `${plan.limits.sources} watched accounts · ` +
+      `${plan.limits.hours} Digest time/day · Upgrade with /pro`,
+  };
+}
+
+function planWelcome(plan) {
+  const capacity = plan.tier === "pro"
+    ? `${plan.limits.sources} watched accounts · ${plan.limits.hours} Digest times/day`
+    : `${plan.limits.sources} watched accounts · ${plan.limits.hours} Digest time/day`;
+  return `${planPresentation(plan).label}\n${capacity}`;
 }
 
 // Early-access gift: the first PROMO_SLOTS users to /start get a free month
@@ -98,12 +170,13 @@ const PROMO_SLOTS = 50;
 async function maybeGrantPromo(env, chatId) {
   const id = String(chatId);
   try {
-    if ((await redis(env, "SCARD", "promo")) >= PROMO_SLOTS) return false;
     const user = await loadUser(env, chatId);
-    if (hasPaidPro(user) || (await isWhitelisted(env, chatId))) return false;
+    if ((await resolvePlan(env, chatId, user)).tier === "pro") return false;
+    if ((await redis(env, "SCARD", "promo")) >= PROMO_SLOTS) return false;
     if ((await redis(env, "SADD", "promo", id)) !== 1) return false;
     const entry = user || userDefaults();
     entry.paid_until = new Date(Date.now() + 30 * 86400 * 1000).toISOString();
+    entry.pro_source = "trial";
     delete entry.free_since;
     delete entry.pro_invite_sent_at;
     await saveUser(env, chatId, entry);
@@ -114,17 +187,16 @@ async function maybeGrantPromo(env, chatId) {
   }
 }
 
-async function registerFreeUser(env, chatId) {
+async function registerFreeUser(env, chatId, plan) {
   const user = (await loadUser(env, chatId)) || userDefaults();
-  if (!hasPaidPro(user) && !(await isWhitelisted(env, chatId)) && !user.free_since) {
+  if (plan.tier === "free" && !user.free_since) {
     user.free_since = new Date().toISOString();
   }
   await saveUser(env, chatId, user);
 }
 
-async function limitsFor(env, chatId, user, isAdmin) {
-  const pro = isAdmin || hasPaidPro(user) || (await isWhitelisted(env, chatId));
-  return LIMITS[pro ? "pro" : "free"];
+async function limitsFor(env, chatId, user) {
+  return (await resolvePlan(env, chatId, user)).limits;
 }
 
 /** Warn about missing setup steps — digests silently skip incomplete users. */
@@ -449,19 +521,24 @@ async function sendProOffer(env, chatId, intro = "") {
 async function sendProInvites(env) {
   const ids = (await redis(env, "SMEMBERS", "uids")) || [];
   if (!ids.length) return;
-  const [raws, whitelist] = await Promise.all([
+  const [raws, whitelist, promo] = await Promise.all([
     redis(env, "MGET", ...ids.map((id) => `user:${id}`)),
     redis(env, "SMEMBERS", "whitelist"),
+    redis(env, "SMEMBERS", "promo"),
   ]);
   const whitelisted = new Set(whitelist || []);
+  const promotional = new Set(promo || []);
   const now = Date.now();
   for (let i = 0; i < ids.length; i++) {
     if (!raws[i]) continue;
     const id = ids[i];
     const user = JSON.parse(raws[i]);
-    const pro = String(id) === String(env.ADMIN_ID) ||
-      whitelisted.has(id) || hasPaidPro(user);
-    if (pro) {
+    const plan = effectivePlan(user, {
+      isAdmin: String(id) === String(env.ADMIN_ID),
+      whitelisted: whitelisted.has(id),
+      promotional: promotional.has(id),
+    });
+    if (plan.tier === "pro") {
       if (user.free_since || user.pro_invite_sent_at) {
         delete user.free_since;
         delete user.pro_invite_sent_at;
@@ -496,10 +573,10 @@ function userDefaults() {
 /** The /settings body + its inline pause/resume toggle. Shared between the
  *  /settings command and the toggle callback so both render identically and
  *  the callback can edit the message in place. */
-async function settingsView(env, chatId, isAdmin) {
+async function settingsView(env, chatId) {
   const u = (await loadUser(env, chatId)) || userDefaults();
-  const paid = hasPaidPro(u);
-  const pro = isAdmin || paid || (await isWhitelisted(env, chatId));
+  const plan = await resolvePlan(env, chatId, u);
+  const presentation = planPresentation(plan);
   const langNames = { en: "English", uk: "Ukrainian", ru: "Russian" };
   const paused = !!u.paused;
   const lines = [
@@ -512,9 +589,7 @@ async function settingsView(env, chatId, isAdmin) {
     `🌐 Language: ${langNames[u.language || "en"]}`,
     `✍️ Style: ${u.style ? esc(u.style) : "default"}`,
     `🔢 Posts per digest: ${u.limit}`,
-    pro
-      ? (paid ? `⭐ Plan: Pro until ${u.paid_until.slice(0, 10)}` : "⭐ Plan: Pro")
-      : "🆓 Plan: free — upgrade with /pro",
+    `${presentation.label}\n${presentation.details}`,
     paused ? "⏸ Digest: Paused" : "▶️ Digest: Active",
   ];
   return {
@@ -538,8 +613,9 @@ async function handleThreadLink(env, chatId, from, url) {
   } catch (err) {
     console.log("thread: user load failed:", err);
   }
-  const pro = isAdmin || hasPaidPro(user) || (await isWhitelisted(env, chatId));
-  const limit = isAdmin ? Infinity : LIMITS[pro ? "pro" : "free"].thread_posts;
+  const plan = await resolvePlan(env, chatId, user);
+  const pro = plan.tier === "pro";
+  const limit = isAdmin ? Infinity : plan.limits.thread_posts;
 
   let used;
   try {
@@ -598,12 +674,16 @@ async function handleMessage(msg, env, ctx) {
       : new Date(Date.now() + 31 * 86400 * 1000);
     await setField(env, chatId, (u) => {
       u.paid_until = until.toISOString();
+      u.pro_source = "paid";
       delete u.free_since;
       delete u.pro_invite_sent_at;
     },
-      `⭐ Pro is active until ${until.toISOString().slice(0, 10)}. ` +
-      `It renews automatically — manage or cancel anytime in ` +
-      `Telegram Settings → My Stars.`);
+      `⭐ <b>XGist Pro</b>\n` +
+      `Your subscription is active until <b>${until.toISOString().slice(0, 10)}</b>.\n` +
+      `You now have ${LIMITS.pro.sources} watched accounts and ` +
+      `${LIMITS.pro.hours} Digest times/day.\n` +
+      `Next: review your Pro setup with /settings. ` +
+      `Manage renewal in Telegram Settings → My Stars.`);
     // Tell the owner about the sale.
     if (env.ADMIN_ID && String(chatId) !== String(env.ADMIN_ID)) {
       const who = msg.from.username
@@ -655,19 +735,22 @@ async function handleMessage(msg, env, ctx) {
   switch (cmd) {
     case "/start":
     case "/help": {
-      await reply(env, chatId, HELP + (isAdmin ? ADMIN_HELP : ""),
+      let promoGranted = false;
+      if (cmd === "/start" && !isAdmin) {
+        promoGranted = await maybeGrantPromo(env, chatId);
+      }
+      const user = await loadUser(env, chatId);
+      const plan = await resolvePlan(env, chatId, user);
+      if (cmd === "/start" && !isAdmin && plan.tier === "free") {
+        await registerFreeUser(env, chatId, plan);
+      }
+      const intro = cmd === "/start" ? planWelcome(plan) + "\n\n" : "";
+      await reply(env, chatId, intro + HELP + (isAdmin ? ADMIN_HELP : ""),
         { reply_markup: MENU });
-      if (cmd === "/start" && !isAdmin && await maybeGrantPromo(env, chatId)) {
-        await reply(env, chatId,
-          "🎁 You're one of our first users — Pro is free for your first month! " +
-          "6 digest times a day, 25 accounts. Tell us what to improve: /feedback");
-        if (env.ADMIN_ID) {
-          await reply(env, Number(env.ADMIN_ID),
-            `🎁 Promo slot used by id ${chatId}` +
-            (msg.from.username ? ` (@${esc(msg.from.username)})` : ""));
-        }
-      } else if (cmd === "/start" && !isAdmin) {
-        await registerFreeUser(env, chatId);
+      if (promoGranted && env.ADMIN_ID) {
+        await reply(env, Number(env.ADMIN_ID),
+          `🎁 Promo slot used by id ${chatId}` +
+          (msg.from.username ? ` (@${esc(msg.from.username)})` : ""));
       }
       return;
     }
@@ -692,12 +775,12 @@ async function handleMessage(msg, env, ctx) {
     case "/pro":
     case "/upgrade": {
       const u = await loadUser(env, chatId);
-      if (isAdmin || (await isWhitelisted(env, chatId))) {
-        return reply(env, chatId, "You already have Pro (courtesy of the house 🎩)");
-      }
-      if (hasPaidPro(u)) {
+      const plan = await resolvePlan(env, chatId, u);
+      if (plan.tier === "pro") {
+        const presentation = planPresentation(plan);
         return reply(env, chatId,
-          `You're already Pro until ${u.paid_until.slice(0, 10)} ⭐`);
+          `${presentation.label}\n${presentation.details}\n` +
+          "Next: review your Pro setup with /settings.");
       }
       const res = await sendProOffer(env, chatId);
       if (!res.ok) {
@@ -724,7 +807,7 @@ async function handleMessage(msg, env, ctx) {
         .filter((h) => /^[a-z0-9_]{1,15}$/.test(h));
       if (!handles.length) return reply(env, chatId, "Usage: /add @naval @pmarca");
       const u0 = await loadUser(env, chatId);
-      const max = (await limitsFor(env, chatId, u0, isAdmin)).sources;
+      const max = (await limitsFor(env, chatId, u0)).sources;
       const current = u0?.sources || [];
       const merged = [...new Set([...current, ...handles])];
       if (merged.length > max) {
@@ -762,7 +845,7 @@ async function handleMessage(msg, env, ctx) {
           "Usage: /schedule 9,18 — the hours (0-23) when you want your digest, in your timezone");
       }
       const u0 = await loadUser(env, chatId);
-      const max = (await limitsFor(env, chatId, u0, isAdmin)).hours;
+      const max = (await limitsFor(env, chatId, u0)).hours;
       if (hours.length > max) {
         return reply(env, chatId,
           `Your plan includes up to ${max} digest time(s) per day. ` +
@@ -808,7 +891,7 @@ async function handleMessage(msg, env, ctx) {
         arg ? "✍️ Caption style saved." : "✍️ Caption style reset to default.");
 
     case "/settings": {
-      const view = await settingsView(env, chatId, isAdmin);
+      const view = await settingsView(env, chatId);
       return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
     }
 
@@ -857,12 +940,17 @@ async function handleMessage(msg, env, ctx) {
       if (!ids.length) return reply(env, chatId, "No users yet.");
       const raws = await redis(env, "MGET", ...ids.map((id) => `user:${id}`));
       const wl = new Set((await redis(env, "SMEMBERS", "whitelist")) || []);
+      const promo = new Set((await redis(env, "SMEMBERS", "promo")) || []);
       const lines = ids.flatMap((id, i) => {
         if (!raws[i]) return [];
         const u = JSON.parse(raws[i]);
-        const plan = hasPaidPro(u)
-          ? `⭐ paid until ${u.paid_until.slice(0, 10)}`
-          : wl.has(id) ? "⭐ whitelisted" : "🆓 free";
+        const access = effectivePlan(u, {
+          isAdmin: String(id) === String(env.ADMIN_ID),
+          whitelisted: wl.has(id),
+          promotional: promo.has(id),
+        });
+        const plan = access.tier === "pro"
+          ? planPresentation(access).label.replace(/<\/?b>/g, "") : "🆓 free";
         return `${id} → ${esc(String(u.channel || "no channel"))}, ` +
                `${(u.sources || []).length} sources, ${(u.hours || []).length} time(s)/day · ${plan}`;
       });
@@ -1012,7 +1100,7 @@ async function handleCallback(cb, env) {
     // The flag is already saved; a failed re-render shouldn't leave the
     // button spinning, so guard the edit and still answer the callback.
     try {
-      const view = await settingsView(env, chatId, isAdminUser(cb.from, env));
+      const view = await settingsView(env, chatId);
       await tg(env, "editMessageText", {
         chat_id: chatId, message_id: controlId, text: view.text,
         parse_mode: "HTML", link_preview_options: { is_disabled: true },

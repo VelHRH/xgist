@@ -104,11 +104,9 @@ The Worker triggers the digest workflow (hourly cron and `/gen_digest_now`).
    - `UPSTASH_REDIS_REST_TOKEN` — from step 4
 3. Add plain **variables** (not secrets):
    - `BOT_USERNAME` — your bot's username without the `@` (used by the landing page button)
-   - `ADMIN_USERNAME` — your Telegram username without `@` (e.g. `velhrh`) —
-     grants you the admin commands
-   - `ADMIN_ID` (recommended) — your numeric Telegram id; send `/id` to the
-     bot once it's live, then add this. Usernames can be released and
-     re-claimed by strangers; the numeric id is the tamper-proof check.
+   - `ADMIN_ID` — your numeric Telegram id; send `/id` to the bot once it's
+     live, then add this. It grants admin commands and administrator Pro access
+     consistently in both the Worker and Digest runner.
 4. Worker → Settings → **Triggers** → Cron Triggers → add `0 * * * *`.
    This makes the Worker start the hourly digest run — Cloudflare's cron is
    punctual, while GitHub's own scheduler silently skips slots (the schedule
@@ -199,7 +197,9 @@ fetched once per run regardless of how many users watch them.
 
 **Plans:** free users get 1 digest time/day and 5 sources; Pro users get
 6 times/day and 25 sources (the `LIMITS` table in `worker/worker.js`,
-mirrored by `FREE_*` constants in `pipeline/digest.py`).
+mirrored by the effective plan model in `pipeline/plans.py`). Paid, trial,
+whitelisted, and administrator access share the Pro limits while retaining
+distinct plan identities in bot messages.
 
 **Payments:** `/pro` sells a monthly auto-renewing subscription via Telegram
 Stars — no external payment provider needed. Price is the `PRO_PRICE_STARS`
@@ -209,7 +209,7 @@ Payments) and are withdrawn through fragment.com after a 21-day hold. Users
 manage/cancel the subscription in Telegram Settings → My Stars; when it
 lapses, the pipeline automatically clamps them back to free limits.
 
-**Admin commands** (only for `ADMIN_USERNAME`/`ADMIN_ID`):
+**Admin commands** (only for `ADMIN_ID`):
 `/whitelist <id>` and `/unwhitelist <id>` grant/revoke free pro access (ask
 the person to send `/id` to the bot to learn their id), `/whitelisted` lists
 ids, `/users` shows everyone registered. Whitelist yourself and your other
