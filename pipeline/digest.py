@@ -321,7 +321,7 @@ def main() -> None:
                 log.exception("failed to preview tweet %s for user %s", tweet["id"], uid)
 
         first_digest = not user_state.get("last_digest_at")
-        if sent == 0 and cfg.get("sources") and first_digest:
+        if not prepared and cfg.get("sources") and first_digest:
             try:
                 heading = ("⭐ <b>XGist Pro · Your first briefing is complete</b>"
                            if cfg["_plan"]["tier"] == "pro" else
@@ -333,7 +333,7 @@ def main() -> None:
                 )
             except Exception:
                 log.exception("failed to notify user %s", uid)
-        elif sent == 0 and (cfg.get("notify_empty") or force_user):
+        elif not prepared and cfg.get("notify_empty"):
             try:
                 tg.send_text(
                     int(uid),

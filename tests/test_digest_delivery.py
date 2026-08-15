@@ -35,14 +35,17 @@ def tweet(created_at):
 
 
 class DigestHarness:
-    def __init__(self, users, state, fetched):
+    def __init__(self, users, state, fetched, preview_error=False):
         self.users = users
         self.state = state
         self.fetched = fetched
+        self.preview_error = preview_error
         self.events = []
         self.next_message_id = 1
 
     def send_preview(self, chat_id, media, caption):
+        if self.preview_error:
+            raise RuntimeError("Preview delivery failed")
         self.events.append(("preview", chat_id, caption))
         message = {"message_id": self.next_message_id}
         self.next_message_id += 1
@@ -57,12 +60,12 @@ class DigestHarness:
     def save_state(self, uid, value):
         self.state[uid] = copy.deepcopy(value)
 
-    def run(self):
+    def run(self, force_user=""):
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(os.environ, {
                 "ADMIN_ID": "",
                 "FORCE_ALL": "1",
-                "FORCE_USER": "",
+                "FORCE_USER": force_user,
                 "THREAD_URL": "",
             }), patch.multiple(
                 digest,
@@ -169,6 +172,31 @@ class DigestDeliveryTest(unittest.TestCase):
         self.assertEqual(harness.events, [
             ("text", 1, "Nothing new from your sources in the window."),
         ])
+
+    def test_later_forced_empty_digest_stays_silent_without_preference(self):
+        now = datetime.now(timezone.utc)
+        harness = DigestHarness(
+            users={"1": {"channel": None, "sources": ["alice"], "hours": [9]}},
+            state={"1": {"last_digest_at": (now - timedelta(days=1)).isoformat()}},
+            fetched={"alice": [tweet(now - timedelta(hours=30))]},
+        )
+
+        harness.run(force_user="1")
+
+        self.assertEqual(harness.events, [])
+
+    def test_preview_failure_is_not_reported_as_an_empty_digest(self):
+        now = datetime.now(timezone.utc)
+        harness = DigestHarness(
+            users={"1": {"channel": None, "sources": ["alice"], "hours": [9]}},
+            state={},
+            fetched={"alice": [tweet(now - timedelta(hours=1))]},
+            preview_error=True,
+        )
+
+        harness.run()
+
+        self.assertEqual(harness.events, [])
 
     def test_send_text_uses_html_for_briefing_identity(self):
         with patch.object(tg, "call") as call:
