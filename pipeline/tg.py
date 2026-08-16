@@ -93,4 +93,4 @@ def send_controls(chat_id: int, content_ids: list[int], label: str) -> None:
 
 
 def send_text(chat_id: int, text: str) -> None:
-    call("sendMessage", chat_id=chat_id, text=text[:4096])
+    call("sendMessage", chat_id=chat_id, text=text[:4096], parse_mode="HTML")

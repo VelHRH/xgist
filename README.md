@@ -159,17 +159,22 @@ to also get admin commands in your autocomplete).
 
 ### 9. Configure yourself as the first user
 
-1. Create your Telegram channel (or use an existing one).
-2. Channel → Administrators → add your bot with **Post messages** permission.
-3. Open a private chat with your bot:
+Open a private chat with your bot and configure the Digest:
 
 ```
-/channel @yourchannel      (for a private channel: forward it any message from the channel)
 /add naval pmarca
 /times 9,18
 /timezone Europe/Kyiv
 /interests AI, startups
 /style short summaries in Ukrainian, no emoji
+```
+
+A Publishing channel is optional for receiving private Previews. To enable
+one-tap posting, create or choose a Telegram channel, add the bot as an
+administrator with **Post messages** permission, then send:
+
+```
+/channel @yourchannel      (for a private channel: forward it any message from the channel)
 ```
 
 ### 10. Test it

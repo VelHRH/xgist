@@ -24,14 +24,14 @@
 
 const HELP = `🤖 XGist — the gist of X, straight to your Telegram channel
 
-Setup — 3 steps:
+Setup — 2 steps:
 
-1️⃣ /channel @yourchannel — connect your channel
+1️⃣ /add @naval @pmarca — X (Twitter) accounts to watch (up to 5 free · 25 with Pro)
+
+2️⃣ /schedule 9,18 — hours (0-23) when I bring you a digest (1 time/day free · 6 with Pro)
+
+Optional: /channel @yourchannel — connect a Publishing channel for one-tap posting
 (first add me as its admin with the "Post messages" permission; private channel? just forward me any message from it)
-
-2️⃣ /add @naval @pmarca — X (Twitter) accounts to watch (up to 5 free · 25 with Pro)
-
-3️⃣ /schedule 9,18 — hours (0-23) when I bring you a digest (1 time/day free · 6 with Pro)
 
 At those hours you'll get previews here. Tap ✅ Post — it's in your channel. Tap ❌ Skip — nobody ever sees it. Tap ✏️ Edit to rewrite the text or swap the images before posting. Tap 🫥 Spoiler to blur the media and text. Tap 🕐 Schedule to publish at a later hour instead of right away.
 
@@ -200,9 +200,8 @@ async function limitsFor(env, chatId, user) {
 }
 
 /** Warn about missing setup steps — digests silently skip incomplete users. */
-function setupHints({ channel, sources }) {
+function setupHints({ sources }) {
   const missing = [];
-  if (!channel) missing.push("• /channel — where approved posts go");
   if (!sources?.length) missing.push("• /add — X accounts to watch");
   return missing.length
     ? "\n\n⚠️ Digests won't start until you also set:\n" + missing.join("\n")
@@ -799,7 +798,7 @@ async function handleMessage(msg, env, ctx) {
       const u0 = await loadUser(env, chatId);
       return setField(env, chatId, (u) => { u.channel = value; },
         `📢 Channel set to ${esc(arg)}. Make sure I'm an admin there with "Post messages" permission.` +
-        setupHints({ channel: value, sources: u0?.sources }));
+        setupHints({ sources: u0?.sources }));
     }
 
     case "/add": {
@@ -818,7 +817,7 @@ async function handleMessage(msg, env, ctx) {
       return setField(env, chatId, (u) => {
         u.sources = [...new Set([...u.sources, ...handles])].slice(0, max);
       }, `👀 Now watching: ${handles.map(xlink).join(", ")}` +
-         setupHints({ channel: u0?.channel, sources: merged }));
+         setupHints({ sources: merged }));
     }
 
     case "/remove": {
@@ -853,7 +852,7 @@ async function handleMessage(msg, env, ctx) {
       }
       return setField(env, chatId, (u) => { u.hours = hours; },
         `🕘 Digest schedule: ${hours.map((h) => String(h).padStart(2, "0") + ":00").join(", ")} (your timezone)` +
-        setupHints({ channel: u0?.channel, sources: u0?.sources }));
+        setupHints({ sources: u0?.sources }));
     }
 
     case "/timezone": {
