@@ -37,7 +37,10 @@ def tweet(created_at):
 def timezone_confirmed(config):
     return {
         **config,
-        "setup": {"timezone_confirmed_at": "2026-01-01T00:00:00+00:00"},
+        "setup": {
+            "timezone_confirmed_at": "2026-01-01T00:00:00+00:00",
+            "digest_time_confirmed_at": "2026-01-01T00:00:00+00:00",
+        },
     }
 
 
@@ -223,6 +226,25 @@ class DigestDeliveryTest(unittest.TestCase):
             users={"1": {
                 "channel": None, "sources": ["alice"], "hours": [9],
                 "timezone": "Europe/Kyiv",
+            }},
+            state={},
+            fetched={"alice": [tweet(now - timedelta(hours=1))]},
+        )
+
+        harness.run()
+
+        self.assertEqual(harness.events, [])
+        self.assertEqual(harness.state, {})
+
+    def test_digest_time_confirmation_is_required_for_digest_eligibility(self):
+        now = datetime.now(timezone.utc)
+        harness = DigestHarness(
+            users={"1": {
+                "channel": None, "sources": ["alice"], "hours": [9],
+                "timezone": "Europe/Kyiv",
+                "setup": {
+                    "timezone_confirmed_at": "2026-01-01T00:00:00+00:00",
+                },
             }},
             state={},
             fetched={"alice": [tweet(now - timedelta(hours=1))]},

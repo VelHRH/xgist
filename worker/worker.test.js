@@ -138,13 +138,25 @@ function accountValidation(id, handle, outcome) {
   return { account_validation: { chat_id: String(id), handle, outcome } };
 }
 
-function callback(id, data) {
+function callback(id, data, from = {}) {
   return {
     callback_query: {
       id: `callback-${id}`,
       data,
+      from: { id, first_name: "Alice", ...from },
       message: { chat: { id }, message_id: 1 },
     },
+  };
+}
+
+function readyForDigestTime(overrides = {}) {
+  return {
+    sources: ["naval"], hours: [9], timezone: "Europe/Kyiv",
+    setup: {
+      current_step: "digest_time",
+      timezone_confirmed_at: "2026-01-01T00:00:00.000Z",
+    },
+    ...overrides,
   };
 }
 
@@ -536,6 +548,21 @@ test("only explicit confirmation completes the timezone prerequisite", async () 
     "2026-06-15T12:00:00.000Z");
   assert.match(sentTo(harness, 320).at(-1), /Guided setup · Step 3 of 3/);
 
+  const legacy = createHarness({
+    users: {
+      321: {
+        sources: ["naval"], hours: [9], timezone: "Europe/London",
+        setup: {
+          current_step: "timezone", timezone_candidate: "Europe/Kyiv",
+        },
+      },
+    },
+  });
+  await sendUpdateAt(legacy, callback(321, "timezone:confirm"), now);
+  assert.equal(legacy.user(321).timezone, "Europe/Kyiv");
+  assert.equal(legacy.user(321).setup.current_step, "digest_time");
+  assert.match(sentTo(legacy, 321).at(-1), /Guided setup · Step 3 of 3/);
+
   await sendUpdateAt(harness, message(320, "/start"), now);
   assert.equal(harness.user(320).setup.current_step, "digest_time");
   assert.match(sentTo(harness, 320).at(-1), /Guided setup · Step 3 of 3/);
@@ -625,4 +652,140 @@ test("direct timezone confirmation preserves the actual required setup step", as
   await sendUpdate(harness, message(360, "/add naval"));
   await sendUpdate(harness, accountValidation(360, "naval", "readable"));
   assert.equal(harness.user(360).setup.current_step, "digest_time");
+});
+
+test("Free Guided setup shows all hours and activates on exactly one explicit choice", async () => {
+  const harness = createHarness({
+    users: { 401: readyForDigestTime() },
+    promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
+  });
+  await sendUpdate(harness, message(401, "/start"));
+
+  const prompt = harness.telegram.find(({ method, params }) =>
+    method === "sendMessage" && params.chat_id === 401);
+  assert.match(prompt.params.text, /Guided setup · Step 3 of 3/);
+  assert.match(prompt.params.text, /Free plan includes exactly one/);
+  assert.match(prompt.params.text, /within a few minutes after the selected hour/);
+  assert.equal(prompt.params.reply_markup.inline_keyboard.length, 6);
+  assert.ok(prompt.params.reply_markup.inline_keyboard.every((row) => row.length === 4));
+  assert.equal(prompt.params.reply_markup.inline_keyboard.flat().length, 24);
+  assert.ok(prompt.params.reply_markup.inline_keyboard.flat()
+    .every(({ text }) => !text.startsWith("✓")));
+  assert.equal(harness.user(401).setup.digest_time_confirmed_at, undefined);
+
+  await sendUpdate(harness, callback(401, "digest-time:pick:14"));
+  const user = harness.user(401);
+  assert.deepEqual(user.hours, [14]);
+  assert.ok(user.setup.digest_time_confirmed_at);
+  assert.ok(user.setup.completed_at);
+  assert.equal(user.setup.current_step, "complete");
+  const completion = harness.telegram.filter(({ method, params }) =>
+    method === "sendMessage" && params.chat_id === 401).at(-1);
+  assert.match(completion.params.text, /Setup complete · XGist Free/);
+  assert.match(completion.params.text, /Alice, your Digest is active at 14:00/);
+  assert.deepEqual(completion.params.reply_markup.inline_keyboard[0]
+    .map(({ text }) => text), ["Connect channel", "Not now"]);
+  assert.deepEqual(harness.telegram.slice(-3).map(({ method }) => method),
+    ["answerCallbackQuery", "editMessageReplyMarkup", "sendMessage"]);
+});
+
+test("every Pro source can select six distinct times, resume, and activate with Done", async () => {
+  const future = new Date(Date.now() + 10 * DAY).toISOString();
+  const cases = [
+    {
+      id: 410,
+      user: { paid_until: future, pro_source: "paid" },
+      expected: /Setup complete · XGist Pro<\/b>/,
+    },
+    {
+      id: 411,
+      user: { paid_until: future, pro_source: "trial" },
+      expected: /Setup complete · XGist Pro Trial/,
+    },
+    {
+      id: 412,
+      user: {},
+      harness: { whitelist: [412] },
+      expected: /Setup complete · XGist Pro · Courtesy access/,
+    },
+    {
+      id: 413,
+      user: {},
+      env: { ADMIN_ID: "413" },
+      expected: /Setup complete · XGist Pro · Administrator/,
+    },
+  ];
+  for (const item of cases) {
+    const harness = createHarness({
+      users: { [item.id]: readyForDigestTime(item.user) },
+      ...(item.harness || {}),
+    });
+    await sendUpdate(harness, message(item.id, "/start"), item.env);
+    for (const hour of [1, 5]) {
+      await sendUpdate(harness, callback(item.id, `digest-time:pick:${hour}`), item.env);
+    }
+    await sendUpdate(harness, message(item.id, "/start"), item.env);
+    const resumed = harness.telegram.filter(({ method, params }) =>
+      method === "sendMessage" && params.chat_id === item.id).at(-1);
+    const resumedLabels = resumed.params.reply_markup.inline_keyboard.flat()
+      .map(({ text }) => text);
+    assert.ok(resumedLabels.includes("✓ 01:00"));
+    assert.ok(resumedLabels.includes("✓ 05:00"));
+    assert.equal(resumedLabels.at(-1), "Done");
+
+    for (const hour of [9, 13, 17, 21]) {
+      await sendUpdate(harness, callback(item.id, `digest-time:pick:${hour}`), item.env);
+    }
+    await sendUpdate(harness, callback(item.id, "digest-time:pick:22"), item.env);
+    assert.deepEqual(harness.user(item.id).setup.digest_time_choices,
+      [1, 5, 9, 13, 17, 21]);
+    assert.match(sentTo(harness, item.id).at(-1), /up to 6 active daily Digest times/);
+
+    await sendUpdate(harness, callback(item.id, "digest-time:done"), item.env);
+    const user = harness.user(item.id);
+    assert.deepEqual(user.hours, [1, 5, 9, 13, 17, 21]);
+    assert.ok(user.setup.completed_at);
+    assert.match(sentTo(harness, item.id).at(-1), item.expected);
+  }
+});
+
+test("schedule completes the same activation prerequisite when earlier steps are ready", async () => {
+  const harness = createHarness({
+    users: { 420: readyForDigestTime() },
+    promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
+  });
+  await sendUpdate(harness, message(420, "/schedule 18"));
+
+  assert.deepEqual(harness.user(420).hours, [18]);
+  assert.ok(harness.user(420).setup.digest_time_confirmed_at);
+  assert.ok(harness.user(420).setup.completed_at);
+  assert.match(sentTo(harness, 420)[0], /Setup complete · XGist Free/);
+
+  const completedAt = harness.user(420).setup.completed_at;
+  await sendUpdate(harness, message(420, "/schedule 7"));
+  assert.deepEqual(harness.user(420).hours, [7]);
+  assert.equal(harness.user(420).setup.completed_at, completedAt);
+  assert.match(sentTo(harness, 420).at(-1), /Digest times updated: 07:00/);
+  assert.doesNotMatch(sentTo(harness, 420).at(-1), /Setup complete/);
+});
+
+test("skipping the optional Publishing channel is a successful terminal path", async () => {
+  const harness = createHarness({
+    users: { 430: readyForDigestTime() },
+    promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
+  });
+  await sendUpdate(harness, message(430, "/schedule 8"));
+  const completedAt = harness.user(430).setup.completed_at;
+  await sendUpdate(harness, callback(430, "setup:skip-channel"));
+
+  const user = harness.user(430);
+  assert.equal(user.setup.completed_at, completedAt);
+  assert.equal(user.setup.current_step, "complete");
+  assert.equal(user.setup.reminder_consumed, true);
+  assert.equal(user.setup.channel_choice, "not_now");
+  assert.ok(user.setup.channel_skipped_at);
+  assert.match(sentTo(harness, 430).at(-1), /Setup complete/);
+  assert.match(sentTo(harness, 430).at(-1), /connect a Publishing channel later/);
+  assert.deepEqual(harness.telegram.slice(-2).map(({ method }) => method),
+    ["answerCallbackQuery", "sendMessage"]);
 });
