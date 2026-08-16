@@ -221,7 +221,9 @@ export default {
       return new Response("ok");
     }
     try {
-      if (update.pre_checkout_query) {
+      if (update.account_validation) {
+        await handleAccountValidation(update.account_validation, env);
+      } else if (update.pre_checkout_query) {
         // Mandatory payment handshake — must be answered within 10 seconds.
         await tg(env, "answerPreCheckoutQuery", {
           pre_checkout_query_id: update.pre_checkout_query.id,
@@ -489,6 +491,136 @@ function dispatchDigest(env, inputs) {
   );
 }
 
+function normalizeHandle(value) {
+  const input = String(value || "").trim();
+  const profile = input.match(
+    /^(?:https?:\/\/)?(?:www\.|mobile\.|m\.)?(?:twitter|x)\.com\/(@?[a-zA-Z0-9_]{1,15})\/?(?:[?#].*)?$/i,
+  );
+  const candidate = (profile ? profile[1] : input).replace(/^@/, "");
+  return /^[a-zA-Z0-9_]{1,15}$/.test(candidate) ? candidate.toLowerCase() : null;
+}
+
+const SETUP_ADD_ACCOUNT = "setup:add-account";
+const SETUP_TIMEZONE = "setup:timezone";
+
+function setupAccountKeyboard() {
+  return { inline_keyboard: [[
+    { text: "➕ Add another", callback_data: SETUP_ADD_ACCOUNT },
+    { text: "🌍 Choose timezone", callback_data: SETUP_TIMEZONE },
+  ]] };
+}
+
+function updateSetup(user, { currentStep, addingAccount } = {}) {
+  const now = new Date().toISOString();
+  user.setup = {
+    started_at: now, completed_at: null, reminder_consumed: false,
+    ...user.setup,
+  };
+  if (currentStep) user.setup.current_step = currentStep;
+  if (addingAccount !== undefined) user.setup.adding_account = addingAccount;
+  user.setup.last_activity_at = now;
+  return user.setup;
+}
+
+function accountStepText(plan) {
+  return "<b>Guided setup · Step 1 of 3</b>\n\n" +
+    "Tell me one X account worth watching. I’ll use its strongest posts to build " +
+    "private Digest previews for you.\n\n" +
+    "Send an @handle, bare handle, or X profile URL.\n" +
+    `Your ${plan.tier === "pro" ? "Pro" : "Free"} plan includes ` +
+    `${plan.limits.sources} watched accounts.`;
+}
+
+async function beginAccountValidation(env, chatId, input) {
+  const handle = normalizeHandle(input);
+  if (!handle) {
+    return reply(env, chatId,
+      "That doesn’t look like an X profile. Send one @handle, bare handle, or profile URL.");
+  }
+  const user = (await loadUser(env, chatId)) || userDefaults();
+  const plan = await resolvePlan(env, chatId, user);
+  const current = user.sources || [];
+  if (user.account_validation?.handle === handle) {
+    return reply(env, chatId,
+      `I’m already checking ${xlink(handle)}. I’ll message you when it’s verified.`);
+  }
+  if (current.includes(handle)) {
+    return reply(env, chatId,
+      `${xlink(handle)} is already in your Watched accounts.\n` +
+      `${current.length}/${plan.limits.sources} accounts used.`,
+      { reply_markup: setupAccountKeyboard() });
+  }
+  if (current.length >= plan.limits.sources) {
+    return reply(env, chatId,
+      `Your ${plan.tier === "pro" ? "Pro" : "Free"} plan includes ` +
+      `${plan.limits.sources} watched accounts. Remove one first` +
+      (plan.tier === "pro" ? "." : " or use /pro for 25."));
+  }
+  const now = new Date().toISOString();
+  updateSetup(user, { currentStep: "account", addingAccount: true });
+  user.account_validation = { handle, requested_at: now };
+  await saveUser(env, chatId, user);
+  const resp = await dispatchDigest(env,
+    { account_handle: handle, only_user: String(chatId) });
+  if (resp.status !== 204) {
+    delete user.account_validation;
+    await saveUser(env, chatId, user);
+    return reply(env, chatId,
+      `I couldn’t start the account check (HTTP ${resp.status}). Please try again.`);
+  }
+  return reply(env, chatId,
+    `Checking ${xlink(handle)} now. I’ll message you when it’s verified.`);
+}
+
+async function handleAccountValidation(result, env) {
+  const chatId = Number(result.chat_id);
+  const handle = normalizeHandle(result.handle);
+  if (!Number.isSafeInteger(chatId) || !handle) return;
+  const user = await loadUser(env, chatId);
+  if (!user || user.account_validation?.handle !== handle) return;
+  delete user.account_validation;
+  updateSetup(user, { addingAccount: false });
+  if (result.outcome === "readable") {
+    const plan = await resolvePlan(env, chatId, user);
+    user.sources = user.sources || [];
+    if (user.sources.includes(handle)) {
+      user.setup.current_step = "timezone";
+      await saveUser(env, chatId, user);
+      return reply(env, chatId,
+        `${xlink(handle)} is already in your Watched accounts.\n` +
+        `${user.sources.length}/${plan.limits.sources} accounts used.`,
+        { reply_markup: setupAccountKeyboard() });
+    }
+    if (user.sources.length >= plan.limits.sources) {
+      user.setup.current_step = "timezone";
+      await saveUser(env, chatId, user);
+      return reply(env, chatId,
+        `${xlink(handle)} is readable, but your ${plan.limits.sources}-account ` +
+        "plan limit was reached before the check finished. Nothing was saved.",
+        { reply_markup: setupAccountKeyboard() });
+    }
+    user.sources.push(handle);
+    user.setup.current_step = "timezone";
+    await saveUser(env, chatId, user);
+    return reply(env, chatId,
+      `✅ ${xlink(handle)} is verified and now watched.\n` +
+      `${user.sources.length}/${plan.limits.sources} accounts used.`,
+      { reply_markup: setupAccountKeyboard() });
+  }
+  user.setup.current_step = "account";
+  await saveUser(env, chatId, user);
+  const messages = {
+    nonexistent: `I couldn’t find ${xlink(handle)}. Check the spelling and try again.`,
+    protected: `${xlink(handle)} is protected, so I can’t read its posts. Try a public account.`,
+    unreadable: `${xlink(handle)} exists, but its posts aren’t readable right now. Try another account.`,
+    transient: `X couldn’t verify ${xlink(handle)} right now. Nothing was saved; please try again.`,
+  };
+  return reply(env, chatId, messages[result.outcome] || messages.transient,
+    { reply_markup: { inline_keyboard: [[
+      { text: "Try another account", callback_data: "ga" },
+    ]] } });
+}
+
 async function createProInvoiceLink(env) {
   const price = Number(env.PRO_PRICE_STARS || 550);
   const res = await tg(env, "createInvoiceLink", {
@@ -724,6 +856,13 @@ async function handleMessage(msg, env, ctx) {
     if (tweetUrl) return handleThreadLink(env, chatId, msg.from, tweetUrl);
   }
 
+  if (!commandish && msg.text) {
+    const user = await loadUser(env, chatId);
+    if (user?.setup?.current_step === "account" || user?.setup?.adding_account) {
+      return beginAccountValidation(env, chatId, msg.text);
+    }
+  }
+
   if (!msg.text) return;
   const text = MENU_BUTTONS[msg.text.trim()] || msg.text.trim();
   const [rawCmd, ...rest] = text.split(/\s+/);
@@ -738,14 +877,33 @@ async function handleMessage(msg, env, ctx) {
       if (cmd === "/start" && !isAdmin) {
         promoGranted = await maybeGrantPromo(env, chatId);
       }
-      const user = await loadUser(env, chatId);
+      let user = await loadUser(env, chatId);
       const plan = await resolvePlan(env, chatId, user);
       if (cmd === "/start" && !isAdmin && plan.tier === "free") {
         await registerFreeUser(env, chatId, plan);
+        user = await loadUser(env, chatId);
       }
-      const intro = cmd === "/start" ? planWelcome(plan) + "\n\n" : "";
-      await reply(env, chatId, intro + HELP + (isAdmin ? ADMIN_HELP : ""),
-        { reply_markup: MENU });
+      if (cmd === "/start" && !user?.sources?.length) {
+        const entry = user || userDefaults();
+        updateSetup(entry, { currentStep: "account" });
+        await saveUser(env, chatId, entry);
+        await reply(env, chatId,
+          planWelcome(plan) + "\n\n" + accountStepText(plan),
+          { reply_markup: MENU });
+      } else if (cmd === "/start" && user?.sources?.length && !user?.timezone) {
+        updateSetup(user, { currentStep: "timezone" });
+        await saveUser(env, chatId, user);
+        await reply(env, chatId,
+          planWelcome(plan) + "\n\n<b>Guided setup · Step 2 of 3</b>\n\n" +
+          "Your first Watched account is ready. Choose your timezone to continue.",
+          { reply_markup: { inline_keyboard: [[
+            { text: "🌍 Choose timezone", callback_data: SETUP_TIMEZONE },
+          ]] } });
+      } else {
+        const intro = cmd === "/start" ? planWelcome(plan) + "\n\n" : "";
+        await reply(env, chatId, intro + HELP + (isAdmin ? ADMIN_HELP : ""),
+          { reply_markup: MENU });
+      }
       if (promoGranted && env.ADMIN_ID) {
         await reply(env, Number(env.ADMIN_ID),
           `🎁 Promo slot used by id ${chatId}` +
@@ -802,22 +960,8 @@ async function handleMessage(msg, env, ctx) {
     }
 
     case "/add": {
-      const handles = arg.split(/[,\s@]+/).map((h) => h.toLowerCase())
-        .filter((h) => /^[a-z0-9_]{1,15}$/.test(h));
-      if (!handles.length) return reply(env, chatId, "Usage: /add @naval @pmarca");
-      const u0 = await loadUser(env, chatId);
-      const max = (await limitsFor(env, chatId, u0)).sources;
-      const current = u0?.sources || [];
-      const merged = [...new Set([...current, ...handles])];
-      if (merged.length > max) {
-        return reply(env, chatId,
-          `Your plan includes up to ${max} accounts (you'd have ${merged.length}). ` +
-          `Pro gives you ${LIMITS.pro.sources} — /pro`);
-      }
-      return setField(env, chatId, (u) => {
-        u.sources = [...new Set([...u.sources, ...handles])].slice(0, max);
-      }, `👀 Now watching: ${handles.map(xlink).join(", ")}` +
-         setupHints({ sources: merged }));
+      if (!arg) return reply(env, chatId, "Usage: /add @naval");
+      return beginAccountValidation(env, chatId, arg);
     }
 
     case "/remove": {
@@ -1000,6 +1144,22 @@ async function handleCallback(cb, env) {
   const controlId = cb.message.message_id;
   const answer = (text, alert = false) =>
     tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert });
+
+  if (cb.data === SETUP_ADD_ACCOUNT) {
+    const user = (await loadUser(env, chatId)) || userDefaults();
+    updateSetup(user, { addingAccount: true });
+    await saveUser(env, chatId, user);
+    await reply(env, chatId,
+      "Send one more @handle, bare handle, or X profile URL.");
+    return answer("");
+  }
+
+  if (cb.data === SETUP_TIMEZONE) {
+    await reply(env, chatId,
+      "<b>Guided setup · Step 2 of 3</b>\n\n" +
+      "Send your timezone as an IANA name, for example /timezone Europe/Kyiv.");
+    return answer("");
+  }
 
   // 🫥 toggle: re-edit the preview so media (and text) are spoiler-blurred;
   // copyMessages then carries the blur into the channel on ✅.

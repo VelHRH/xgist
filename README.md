@@ -77,8 +77,10 @@ Repo → Settings → Secrets and variables → Actions → **New repository sec
 | `TWITTER_COOKIES` | full content of the exported cookies.txt |
 | `UPSTASH_REDIS_REST_URL` | from step 4 |
 | `UPSTASH_REDIS_REST_TOKEN` | from step 4 |
+| `WEBHOOK_SECRET` | the same random value configured on the Worker |
 
-Optionally, under *Variables*, set `DEFAULT_TZ` (default is `Europe/Kyiv`).
+Under *Variables*, set `WORKER_URL` to the deployed Worker URL. Optionally set
+`DEFAULT_TZ` (default is `Europe/Kyiv`).
 
 ### 6. Create a GitHub token for the Worker
 
@@ -159,10 +161,12 @@ to also get admin commands in your autocomplete).
 
 ### 9. Configure yourself as the first user
 
-Open a private chat with your bot and configure the Digest:
+Open a private chat with your bot and send `/start`. Guided setup verifies each
+Watched account before saving it, then walks through timezone and Digest time.
+You can also add another account directly:
 
 ```
-/add naval pmarca
+/add naval
 /times 9,18
 /timezone Europe/Kyiv
 /interests AI, startups

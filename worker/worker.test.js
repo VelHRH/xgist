@@ -5,7 +5,7 @@ import worker from "./worker.js";
 
 const DAY = 86400000;
 
-function createHarness({ users = {}, whitelist = [], promo = [] } = {}) {
+function createHarness({ users = {}, whitelist = [], promo = [], githubStatus = 204 } = {}) {
   const values = new Map();
   const sets = new Map([
     ["uids", new Set(Object.keys(users))],
@@ -16,6 +16,7 @@ function createHarness({ users = {}, whitelist = [], promo = [] } = {}) {
     values.set(`user:${id}`, JSON.stringify(user));
   }
   const telegram = [];
+  const github = [];
   let messageId = 1;
 
   const redis = (cmd) => {
@@ -64,11 +65,16 @@ function createHarness({ users = {}, whitelist = [], promo = [] } = {}) {
         ? "https://invoice.test/pro" : { message_id: messageId++ };
       return Response.json({ ok: true, result });
     }
+    if (target.startsWith("https://api.github.com/")) {
+      github.push(JSON.parse(options.body));
+      return new Response(null, { status: githubStatus });
+    }
     throw new Error(`Unexpected request: ${target}`);
   };
 
   return {
     fetch,
+    github,
     telegram,
     user(id) {
       const raw = values.get(`user:${id}`);
@@ -84,6 +90,8 @@ function env(overrides = {}) {
     UPSTASH_REDIS_REST_URL: "https://redis.test",
     UPSTASH_REDIS_REST_TOKEN: "redis-token",
     PRO_PRICE_STARS: "550",
+    GH_TOKEN: "gh-token",
+    GH_REPO: "owner/repo",
     ...overrides,
   };
 }
@@ -126,6 +134,20 @@ function message(id, text, from = {}) {
   };
 }
 
+function accountValidation(id, handle, outcome) {
+  return { account_validation: { chat_id: String(id), handle, outcome } };
+}
+
+function callback(id, data) {
+  return {
+    callback_query: {
+      id: `callback-${id}`,
+      data,
+      message: { chat: { id }, message_id: 1 },
+    },
+  };
+}
+
 function sentTo(harness, id) {
   return harness.telegram
     .filter(({ method, params }) => method === "sendMessage" && params.chat_id === id)
@@ -147,15 +169,18 @@ test("a promotional trial is granted before the first welcome", async () => {
 
 test("free access keeps the existing limits and upgrade action", async () => {
   const promo = Array.from({ length: 50 }, (_, index) => `promo-${index}`);
-  const harness = createHarness({ promo });
+  const harness = createHarness({
+    promo,
+    users: { 102: { sources: ["a", "b", "c", "d", "e"], hours: [9] } },
+  });
   await sendUpdate(harness, message(102, "/start"));
-  await sendUpdate(harness, message(102, "/add a b c d e f"));
+  await sendUpdate(harness, message(102, "/add f"));
   await sendUpdate(harness, message(102, "/schedule 9,18"));
   await sendUpdate(harness, message(102, "/settings"));
 
   const replies = sentTo(harness, 102);
   assert.match(replies[0], /^🆓 <b>XGist Free<\/b>/);
-  assert.match(replies[1], /up to 5 accounts/);
+  assert.match(replies[1], /includes 5 watched accounts/);
   assert.match(replies[2], /up to 1 digest time\(s\) per day/);
   assert.match(replies[3], /🆓 <b>XGist Free<\/b>/);
   assert.match(replies[3], /Upgrade with \/pro/);
@@ -165,14 +190,10 @@ test("help and setup hints treat the Publishing channel as optional", async () =
   const promo = Array.from({ length: 50 }, (_, index) => `promo-${index}`);
   const harness = createHarness({ promo });
   await sendUpdate(harness, message(110, "/help"));
-  await sendUpdate(harness, message(110, "/add naval"));
 
   const replies = sentTo(harness, 110);
   assert.match(replies[0], /Setup — 2 steps/);
   assert.match(replies[0], /Optional: \/channel @yourchannel/);
-  assert.match(replies[1], /Now watching/);
-  assert.doesNotMatch(replies[1], /channel/);
-  assert.doesNotMatch(replies[1], /Digests won't start/);
 });
 
 test("paid access is labeled honestly and keeps Pro limits", async () => {
@@ -180,17 +201,15 @@ test("paid access is labeled honestly and keeps Pro limits", async () => {
   const harness = createHarness({
     users: { 103: { sources: [], hours: [9], pro_source: "paid", paid_until: paidUntil } },
   });
-  await sendUpdate(harness, message(103, "/add a b c d e f"));
   await sendUpdate(harness, message(103, "/schedule 1,2,3,4,5,6"));
   await sendUpdate(harness, message(103, "/pro"));
 
   const replies = sentTo(harness, 103);
-  assert.match(replies[0], /Now watching/);
-  assert.match(replies[1], /01:00, 02:00, 03:00, 04:00, 05:00, 06:00/);
-  assert.match(replies[2], /^⭐ <b>XGist Pro<\/b>/);
-  assert.match(replies[2], new RegExp(paidUntil.slice(0, 10)));
-  assert.match(replies[2], /Telegram Settings → My Stars/);
-  assert.match(replies[2], /review your Pro setup with \/settings/);
+  assert.match(replies[0], /01:00, 02:00, 03:00, 04:00, 05:00, 06:00/);
+  assert.match(replies[1], /^⭐ <b>XGist Pro<\/b>/);
+  assert.match(replies[1], new RegExp(paidUntil.slice(0, 10)));
+  assert.match(replies[1], /Telegram Settings → My Stars/);
+  assert.match(replies[1], /review your Pro setup with \/settings/);
 });
 
 test("legacy promotional users retain a trial identity", async () => {
@@ -208,9 +227,9 @@ test("courtesy and administrator access have distinct identities and Pro limits"
     users: { 105: { sources: [], hours: [9] } },
     whitelist: [105],
   });
-  await sendUpdate(courtesy, message(105, "/add a b c d e f"));
+  await sendUpdate(courtesy, message(105, "/start"));
   await sendUpdate(courtesy, message(105, "/pro"));
-  assert.match(sentTo(courtesy, 105)[0], /Now watching/);
+  assert.match(sentTo(courtesy, 105)[0], /25 watched accounts/);
   assert.match(sentTo(courtesy, 105)[1], /XGist Pro · Courtesy access/);
 
   const administrator = createHarness({ users: { 106: { sources: [], hours: [9] } } });
@@ -296,4 +315,143 @@ test("the Free upgrade offer preserves the configured price and renewal", async 
   assert.equal(invoice.params.subscription_period, 2592000);
   assert.match(sentTo(harness, 109)[0], /550 Stars \/ month/);
   assert.match(sentTo(harness, 109)[0], /Renews automatically/);
+});
+
+test("new and repeated start resume Watched account setup without losing progress", async () => {
+  const harness = createHarness({
+    promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
+  });
+  await sendUpdate(harness, message(201, "/start"));
+  const startedAt = harness.user(201).setup.started_at;
+  await sendUpdate(harness, message(201, "/start"));
+
+  const replies = sentTo(harness, 201);
+  assert.equal(replies.length, 2);
+  assert.match(replies[0], /Guided setup · Step 1 of 3/);
+  assert.match(replies[0], /5 watched accounts/);
+  assert.match(replies[1], /Guided setup · Step 1 of 3/);
+  assert.equal(harness.user(201).setup.started_at, startedAt);
+  assert.equal(harness.user(201).setup.current_step, "account");
+
+  const configured = createHarness({
+    users: { 202: { sources: ["naval"], hours: [9], timezone: null } },
+  });
+  await sendUpdate(configured, message(202, "/start"));
+  assert.equal(configured.user(202).setup.current_step, "timezone");
+  assert.match(sentTo(configured, 202)[0], /Guided setup · Step 2 of 3/);
+});
+
+test("accepted handle forms dispatch canonical validation and save only after success", async () => {
+  const cases = [
+    [211, "@Naval"],
+    [212, "NAVAL"],
+    [213, "https://x.com/Naval"],
+    [214, "https://mobile.twitter.com/@Naval/?ref=home"],
+  ];
+  for (const [id, input] of cases) {
+    const harness = createHarness({
+      promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
+    });
+    await sendUpdate(harness, message(id, `/add ${input}`));
+    assert.deepEqual(harness.github[0].inputs, {
+      account_handle: "naval", only_user: String(id),
+    });
+    assert.deepEqual(harness.user(id).sources, []);
+
+    await sendUpdate(harness, accountValidation(id, "naval", "readable"));
+    assert.deepEqual(harness.user(id).sources, ["naval"]);
+    assert.equal(harness.user(id).setup.current_step, "timezone");
+    const sent = harness.telegram.filter(({ method, params }) =>
+      method === "sendMessage" && params.chat_id === id).at(-1);
+    assert.match(sent.params.text, /verified and now watched/);
+    assert.deepEqual(sent.params.reply_markup.inline_keyboard[0].map(({ text }) => text),
+      ["➕ Add another", "🌍 Choose timezone"]);
+  }
+});
+
+test("Guided setup rejects malformed input before validation", async () => {
+  const harness = createHarness();
+  await sendUpdate(harness, message(220, "/start"));
+  await sendUpdate(harness, message(220, "/add https://x.com/naval/status/123"));
+
+  assert.equal(harness.github.length, 0);
+  assert.deepEqual(harness.user(220).sources, []);
+  assert.match(sentTo(harness, 220).at(-1), /doesn’t look like an X profile/);
+});
+
+test("validation outcomes are distinct, recoverable, and never save an unreadable account", async () => {
+  const outcomes = [
+    ["nonexistent", /couldn’t find/],
+    ["protected", /is protected/],
+    ["unreadable", /exists, but its posts aren’t readable/],
+    ["transient", /couldn’t verify.*right now/],
+  ];
+  let id = 230;
+  for (const [outcome, expected] of outcomes) {
+    const harness = createHarness();
+    await sendUpdate(harness, message(id, "/add sample"));
+    await sendUpdate(harness, accountValidation(id, "sample", outcome));
+
+    assert.deepEqual(harness.user(id).sources, []);
+    assert.equal(harness.user(id).setup.current_step, "account");
+    assert.equal(harness.user(id).account_validation, undefined);
+    assert.match(sentTo(harness, id).at(-1), expected);
+    const sent = harness.telegram.filter(({ method, params }) =>
+      method === "sendMessage" && params.chat_id === id).at(-1);
+    assert.equal(sent.params.reply_markup.inline_keyboard[0][0].text,
+      "Try another account");
+    id++;
+  }
+});
+
+test("duplicate accounts and plan limits do not dispatch validation", async () => {
+  const promo = Array.from({ length: 50 }, (_, index) => `used-${index}`);
+  const duplicate = createHarness({
+    promo,
+    users: { 240: { sources: ["naval"], hours: [9] } },
+  });
+  await sendUpdate(duplicate, message(240, "/add @NAVAL"));
+  assert.equal(duplicate.github.length, 0);
+  assert.match(sentTo(duplicate, 240)[0], /already in your Watched accounts/);
+
+  const limited = createHarness({
+    promo,
+    users: { 241: { sources: ["a", "b", "c", "d", "e"], hours: [9] } },
+  });
+  await sendUpdate(limited, message(241, "/add sixth"));
+  assert.equal(limited.github.length, 0);
+  assert.match(sentTo(limited, 241)[0], /includes 5 watched accounts/);
+});
+
+test("plain setup input and the add command share validation progress", async () => {
+  const plain = createHarness();
+  await sendUpdate(plain, message(250, "/start"));
+  await sendUpdate(plain, message(250, "@Naval"));
+
+  const command = createHarness();
+  await sendUpdate(command, message(251, "/add @Naval"));
+
+  assert.equal(plain.user(250).account_validation.handle, "naval");
+  assert.equal(command.user(251).account_validation.handle, "naval");
+  assert.equal(plain.user(250).setup.adding_account, true);
+  assert.equal(command.user(251).setup.adding_account, true);
+});
+
+test("successful add actions continue the same Guided setup", async () => {
+  const harness = createHarness({
+    users: {
+      260: {
+        sources: ["naval"], hours: [9],
+        setup: { current_step: "timezone", adding_account: false },
+      },
+    },
+  });
+  await sendUpdate(harness, callback(260, "setup:add-account"));
+  assert.equal(harness.user(260).setup.adding_account, true);
+  assert.match(sentTo(harness, 260).at(-1), /Send one more/);
+
+  await sendUpdate(harness, message(260, "pmarca"));
+  assert.equal(harness.user(260).account_validation.handle, "pmarca");
+  await sendUpdate(harness, callback(260, "setup:timezone"));
+  assert.match(sentTo(harness, 260).at(-1), /Guided setup · Step 2 of 3/);
 });
