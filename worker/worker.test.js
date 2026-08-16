@@ -455,3 +455,174 @@ test("successful add actions continue the same Guided setup", async () => {
   await sendUpdate(harness, callback(260, "setup:timezone"));
   assert.match(sentTo(harness, 260).at(-1), /Guided setup · Step 2 of 3/);
 });
+
+test("city and IANA input resolve to a confirmation without saving early", async () => {
+  const winter = Date.parse("2026-01-15T12:00:00.000Z");
+  const city = createHarness({
+    users: {
+      301: {
+        sources: ["naval"], hours: [9], timezone: null,
+        setup: { current_step: "timezone" },
+      },
+    },
+  });
+  await sendUpdateAt(city, message(301, "Kyiv"), winter);
+
+  assert.equal(city.user(301).timezone, null);
+  assert.equal(city.user(301).setup.timezone_candidate, "Europe/Kyiv");
+  assert.match(sentTo(city, 301)[0], /Timezone: <code>Europe\/Kyiv<\/code>/);
+  assert.match(sentTo(city, 301)[0], /14:00/);
+
+  const iana = createHarness({
+    users: {
+      302: {
+        sources: ["naval"], hours: [9], timezone: null,
+        setup: { current_step: "timezone" },
+      },
+    },
+  });
+  await sendUpdateAt(iana, message(302, "/timezone America/North_Dakota/Center"),
+    winter);
+  assert.equal(iana.user(302).setup.timezone_candidate,
+    "America/North_Dakota/Center");
+  assert.equal(iana.user(302).timezone, null);
+});
+
+test("ambiguous city input requires a disambiguation choice", async () => {
+  const harness = createHarness({
+    users: {
+      310: {
+        sources: ["naval"], hours: [9], timezone: null,
+        setup: { current_step: "timezone" },
+      },
+    },
+  });
+  await sendUpdate(harness, message(310, "Springfield"));
+
+  assert.equal(harness.user(310).timezone, null);
+  assert.equal(harness.user(310).setup.timezone_choices.length, 2);
+  const prompt = harness.telegram.find(({ method, params }) =>
+    method === "sendMessage" && params.chat_id === 310);
+  assert.match(prompt.params.text, /more than one match/);
+  assert.deepEqual(prompt.params.reply_markup.inline_keyboard.map((row) => row[0].text),
+    ["Springfield, Illinois", "Springfield, Massachusetts"]);
+
+  await sendUpdate(harness, callback(310, "timezone:pick:1"));
+  assert.equal(harness.user(310).setup.timezone_candidate, "America/New_York");
+  assert.equal(harness.user(310).timezone, null);
+  const methods = harness.telegram.slice(-2).map(({ method }) => method);
+  assert.deepEqual(methods, ["answerCallbackQuery", "sendMessage"]);
+});
+
+test("only explicit confirmation completes the timezone prerequisite", async () => {
+  const now = Date.parse("2026-06-15T12:00:00.000Z");
+  const harness = createHarness({
+    users: {
+      320: {
+        sources: ["naval"], hours: [9], timezone: null,
+        setup: { current_step: "timezone" },
+      },
+    },
+  });
+  await sendUpdateAt(harness, message(320, "/timezone Europe/Kyiv"), now);
+  assert.equal(harness.user(320).timezone, null);
+  assert.equal(harness.user(320).setup.timezone_confirmed_at, undefined);
+  assert.match(sentTo(harness, 320)[0], /15:00/);
+
+  await sendUpdateAt(harness, callback(320, "timezone:confirm"), now);
+  assert.equal(harness.user(320).timezone, "Europe/Kyiv");
+  assert.equal(harness.user(320).setup.current_step, "digest_time");
+  assert.equal(harness.user(320).setup.timezone_confirmed_at,
+    "2026-06-15T12:00:00.000Z");
+  assert.match(sentTo(harness, 320).at(-1), /Guided setup · Step 3 of 3/);
+
+  await sendUpdateAt(harness, message(320, "/start"), now);
+  assert.equal(harness.user(320).setup.current_step, "digest_time");
+  assert.match(sentTo(harness, 320).at(-1), /Guided setup · Step 3 of 3/);
+});
+
+test("invalid timezone input stays recoverably on step 2", async () => {
+  const harness = createHarness({
+    users: {
+      330: {
+        sources: ["naval"], hours: [9], timezone: null,
+        setup: { current_step: "timezone" },
+      },
+    },
+  });
+  await sendUpdate(harness, message(330, "/timezone Middle of nowhere"));
+
+  assert.equal(harness.user(330).timezone, null);
+  assert.equal(harness.user(330).setup.current_step, "timezone");
+  assert.equal(harness.user(330).setup.choosing_timezone, true);
+  assert.match(sentTo(harness, 330)[0], /couldn’t resolve/);
+  assert.match(sentTo(harness, 330)[0], /Europe\/Kyiv/);
+});
+
+test("start resumes a pending timezone confirmation", async () => {
+  const harness = createHarness({
+    users: {
+      340: {
+        sources: ["naval"], hours: [9], timezone: null,
+        setup: {
+          current_step: "timezone", timezone_candidate: "Europe/London",
+        },
+      },
+    },
+  });
+  await sendUpdate(harness, message(340, "/start"));
+
+  assert.equal(harness.user(340).timezone, null);
+  assert.equal(harness.user(340).setup.timezone_candidate, "Europe/London");
+  assert.match(sentTo(harness, 340)[0], /Timezone: <code>Europe\/London<\/code>/);
+  const sent = harness.telegram.find(({ method, params }) =>
+    method === "sendMessage" && params.chat_id === 340);
+  assert.equal(sent.params.reply_markup.inline_keyboard[0][0].callback_data,
+    "timezone:confirm");
+});
+
+test("timezone changes preserve local Digest hours and share command progress", async () => {
+  const harness = createHarness({
+    users: {
+      350: {
+        sources: ["naval"], hours: [8, 18], timezone: "America/New_York",
+        setup: {
+          current_step: "complete", completed_at: "2026-01-01T00:00:00.000Z",
+          timezone_confirmed_at: "2026-01-01T00:00:00.000Z",
+        },
+      },
+    },
+  });
+  await sendUpdate(harness, message(350, "/timezone London"));
+  assert.equal(harness.user(350).timezone, "America/New_York");
+  assert.equal(harness.user(350).setup.current_step, "timezone");
+
+  await sendUpdate(harness, callback(350, "timezone:confirm"));
+  assert.equal(harness.user(350).timezone, "Europe/London");
+  assert.equal(harness.user(350).setup.current_step, "complete");
+  assert.equal(harness.user(350).setup.completed_at, "2026-01-01T00:00:00.000Z");
+  assert.deepEqual(harness.user(350).hours, [8, 18]);
+  assert.match(sentTo(harness, 350).at(-1), /Digest times remain 08:00, 18:00/);
+  assert.match(sentTo(harness, 350).at(-1), /local wall-clock time/);
+});
+
+test("direct timezone confirmation preserves the actual required setup step", async () => {
+  const harness = createHarness({
+    users: {
+      360: {
+        sources: [], hours: [9], timezone: null,
+        setup: { current_step: "account" },
+      },
+    },
+  });
+  await sendUpdate(harness, message(360, "/timezone Kyiv"));
+  await sendUpdate(harness, callback(360, "timezone:confirm"));
+
+  assert.equal(harness.user(360).timezone, "Europe/Kyiv");
+  assert.equal(harness.user(360).setup.current_step, "account");
+  assert.match(sentTo(harness, 360).at(-1), /adding a Watched account/);
+
+  await sendUpdate(harness, message(360, "/add naval"));
+  await sendUpdate(harness, accountValidation(360, "naval", "readable"));
+  assert.equal(harness.user(360).setup.current_step, "digest_time");
+});
