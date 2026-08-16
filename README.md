@@ -163,12 +163,13 @@ to also get admin commands in your autocomplete).
 
 Open a private chat with your bot and send `/start`. Guided setup verifies each
 Watched account before saving it, then walks through timezone and Digest time.
-You can also add another account directly:
+You can also use the setup commands directly; timezone accepts a familiar city
+or an exact IANA timezone and asks for confirmation before saving:
 
 ```
 /add naval
 /times 9,18
-/timezone Europe/Kyiv
+/timezone Kyiv
 /interests AI, startups
 /style short summaries in Ukrainian, no emoji
 ```

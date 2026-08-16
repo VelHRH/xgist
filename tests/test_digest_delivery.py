@@ -34,6 +34,13 @@ def tweet(created_at):
     }
 
 
+def timezone_confirmed(config):
+    return {
+        **config,
+        "setup": {"timezone_confirmed_at": "2026-01-01T00:00:00+00:00"},
+    }
+
+
 class DigestHarness:
     def __init__(self, users, state, fetched, preview_error=False):
         self.users = users
@@ -93,15 +100,17 @@ class DigestDeliveryTest(unittest.TestCase):
         paid_until = (now + timedelta(days=10)).isoformat()
         harness = DigestHarness(
             users={
-                "1": {"channel": "@news", "sources": ["alice"], "hours": [9]},
-                "2": {"channel": None, "sources": ["alice"], "hours": [9]},
-                "3": {
+                "1": timezone_confirmed(
+                    {"channel": "@news", "sources": ["alice"], "hours": [9]}),
+                "2": timezone_confirmed(
+                    {"channel": None, "sources": ["alice"], "hours": [9]}),
+                "3": timezone_confirmed({
                     "channel": None,
                     "sources": ["alice"],
                     "hours": [9],
                     "paid_until": paid_until,
                     "pro_source": "paid",
-                },
+                }),
             },
             state={},
             fetched={"alice": [tweet(now - timedelta(hours=1))]},
@@ -135,7 +144,8 @@ class DigestDeliveryTest(unittest.TestCase):
     def test_only_the_first_empty_digest_is_acknowledged(self):
         now = datetime.now(timezone.utc)
         harness = DigestHarness(
-            users={"1": {"channel": None, "sources": ["alice"], "hours": [9]}},
+            users={"1": timezone_confirmed(
+                {"channel": None, "sources": ["alice"], "hours": [9]})},
             state={},
             fetched={"alice": [tweet(now - timedelta(hours=30))]},
         )
@@ -156,12 +166,12 @@ class DigestDeliveryTest(unittest.TestCase):
         now = datetime.now(timezone.utc)
         harness = DigestHarness(
             users={
-                "1": {
+                "1": timezone_confirmed({
                     "channel": None,
                     "sources": ["alice"],
                     "hours": [9],
                     "notify_empty": True,
-                },
+                }),
             },
             state={"1": {"last_digest_at": (now - timedelta(days=1)).isoformat()}},
             fetched={"alice": [tweet(now - timedelta(hours=30))]},
@@ -176,7 +186,8 @@ class DigestDeliveryTest(unittest.TestCase):
     def test_later_forced_empty_digest_stays_silent_without_preference(self):
         now = datetime.now(timezone.utc)
         harness = DigestHarness(
-            users={"1": {"channel": None, "sources": ["alice"], "hours": [9]}},
+            users={"1": timezone_confirmed(
+                {"channel": None, "sources": ["alice"], "hours": [9]})},
             state={"1": {"last_digest_at": (now - timedelta(days=1)).isoformat()}},
             fetched={"alice": [tweet(now - timedelta(hours=30))]},
         )
@@ -188,7 +199,8 @@ class DigestDeliveryTest(unittest.TestCase):
     def test_preview_failure_is_not_reported_as_an_empty_digest(self):
         now = datetime.now(timezone.utc)
         harness = DigestHarness(
-            users={"1": {"channel": None, "sources": ["alice"], "hours": [9]}},
+            users={"1": timezone_confirmed(
+                {"channel": None, "sources": ["alice"], "hours": [9]})},
             state={},
             fetched={"alice": [tweet(now - timedelta(hours=1))]},
             preview_error=True,
@@ -204,6 +216,22 @@ class DigestDeliveryTest(unittest.TestCase):
         call.assert_called_once_with(
             "sendMessage", chat_id=1, text="⭐ <b>XGist Pro</b>",
             parse_mode="HTML")
+
+    def test_timezone_confirmation_is_required_for_digest_eligibility(self):
+        now = datetime.now(timezone.utc)
+        harness = DigestHarness(
+            users={"1": {
+                "channel": None, "sources": ["alice"], "hours": [9],
+                "timezone": "Europe/Kyiv",
+            }},
+            state={},
+            fetched={"alice": [tweet(now - timedelta(hours=1))]},
+        )
+
+        harness.run()
+
+        self.assertEqual(harness.events, [])
+        self.assertEqual(harness.state, {})
 
 
 if __name__ == "__main__":

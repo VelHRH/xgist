@@ -502,6 +502,19 @@ function normalizeHandle(value) {
 
 const SETUP_ADD_ACCOUNT = "setup:add-account";
 const SETUP_TIMEZONE = "setup:timezone";
+const TIMEZONE_CONFIRM = "timezone:confirm";
+const TIMEZONE_RETRY = "timezone:retry";
+const TIMEZONE_PICK = "timezone:pick:";
+const CITY_TIMEZONE_CHOICES = {
+  kyiv: [{ label: "Kyiv, Ukraine", zone: "Europe/Kyiv" }],
+  kiev: [{ label: "Kyiv, Ukraine", zone: "Europe/Kyiv" }],
+  "new york": [{ label: "New York, United States", zone: "America/New_York" }],
+  "los angeles": [{ label: "Los Angeles, United States", zone: "America/Los_Angeles" }],
+  springfield: [
+    { label: "Springfield, Illinois", zone: "America/Chicago" },
+    { label: "Springfield, Massachusetts", zone: "America/New_York" },
+  ],
+};
 
 function setupAccountKeyboard() {
   return { inline_keyboard: [[
@@ -522,6 +535,13 @@ function updateSetup(user, { currentStep, addingAccount } = {}) {
   return user.setup;
 }
 
+function requiredSetupStep(user) {
+  if (!user?.sources?.length) return "account";
+  if (!user?.setup?.timezone_confirmed_at) return "timezone";
+  if (!user?.setup?.digest_time_confirmed_at) return "digest_time";
+  return "complete";
+}
+
 function accountStepText(plan) {
   return "<b>Guided setup · Step 1 of 3</b>\n\n" +
     "Tell me one X account worth watching. I’ll use its strongest posts to build " +
@@ -529,6 +549,145 @@ function accountStepText(plan) {
     "Send an @handle, bare handle, or X profile URL.\n" +
     `Your ${plan.tier === "pro" ? "Pro" : "Free"} plan includes ` +
     `${plan.limits.sources} watched accounts.`;
+}
+
+function canonicalTimezone(input) {
+  const value = String(input || "").trim();
+  if (!value || /^(?:UTC|GMT|Etc\/(?:UTC|GMT[+-]?\d*))$/i.test(value)) return null;
+  try {
+    const resolved = new Intl.DateTimeFormat("en", { timeZone: value })
+      .resolvedOptions().timeZone;
+    if (/^(?:UTC|GMT|Etc\/(?:UTC|GMT[+-]?\d*))$/i.test(resolved)) return null;
+    return resolved === "Europe/Kiev" ? "Europe/Kyiv" : resolved;
+  } catch {
+    return null;
+  }
+}
+
+function cityTimezoneChoices(input) {
+  const city = String(input || "").trim().toLowerCase()
+    .replace(/_/g, " ").replace(/\s+/g, " ");
+  if (CITY_TIMEZONE_CHOICES[city]) return CITY_TIMEZONE_CHOICES[city];
+  const zones = typeof Intl.supportedValuesOf === "function"
+    ? Intl.supportedValuesOf("timeZone") : [];
+  const matches = zones.filter((zone) =>
+    zone.split("/").at(-1).replace(/_/g, " ").toLowerCase() === city);
+  return matches.map((zone) => ({ label: zone.replace(/_/g, " "), zone }));
+}
+
+function localTimeIn(timezone) {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone, weekday: "short", day: "2-digit", month: "short",
+    year: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short",
+  }).format(new Date(Date.now()));
+}
+
+function timezoneConfirmationText(timezone) {
+  return "<b>Guided setup · Step 2 of 3</b>\n\n" +
+    `Timezone: <code>${esc(timezone)}</code>\n` +
+    `Current local time: <b>${esc(localTimeIn(timezone))}</b>\n\n` +
+    "Is this correct?";
+}
+
+function timezoneConfirmationKeyboard() {
+  return { inline_keyboard: [
+    [{ text: "✅ Confirm timezone", callback_data: TIMEZONE_CONFIRM }],
+    [{ text: "Choose another", callback_data: TIMEZONE_RETRY }],
+  ] };
+}
+
+async function showTimezoneStep(env, chatId, user, intro = "") {
+  updateSetup(user, { currentStep: "timezone" });
+  if (!user.setup.timezone_candidate && user.timezone) {
+    user.setup.timezone_candidate = canonicalTimezone(user.timezone);
+  }
+  await saveUser(env, chatId, user);
+  if (user.setup.timezone_candidate) {
+    return reply(env, chatId,
+      intro + timezoneConfirmationText(user.setup.timezone_candidate),
+      { reply_markup: timezoneConfirmationKeyboard() });
+  }
+  return reply(env, chatId,
+    intro + "<b>Guided setup · Step 2 of 3</b>\n\n" +
+    "Choose the timezone for your Digest times. Send a city such as Kyiv or " +
+    "an IANA timezone such as Europe/Kyiv.");
+}
+
+async function showDigestTimeStep(env, chatId, user, intro = "") {
+  updateSetup(user, { currentStep: "digest_time" });
+  await saveUser(env, chatId, user);
+  return reply(env, chatId,
+    intro + "<b>Guided setup · Step 3 of 3</b>\n\n" +
+    "Choose the local hour when you want your Digest with /schedule 9.");
+}
+
+async function beginTimezoneResolution(env, chatId, input) {
+  const user = (await loadUser(env, chatId)) || userDefaults();
+  const timezone = canonicalTimezone(input);
+  const choices = timezone
+    ? [{ label: timezone.replace(/_/g, " "), zone: timezone }]
+    : cityTimezoneChoices(input);
+  updateSetup(user, { currentStep: "timezone" });
+  delete user.setup.timezone_candidate;
+  delete user.setup.timezone_choices;
+  if (!choices.length) {
+    user.setup.choosing_timezone = true;
+    await saveUser(env, chatId, user);
+    return reply(env, chatId,
+      "I couldn’t resolve that timezone. Try a city such as Kyiv or a valid " +
+      "IANA timezone such as Europe/Kyiv.");
+  }
+  if (choices.length > 1) {
+    user.setup.choosing_timezone = true;
+    user.setup.timezone_choices = choices;
+    await saveUser(env, chatId, user);
+    return reply(env, chatId,
+      `I found more than one match for “${esc(input)}”. Which one did you mean?`,
+      { reply_markup: { inline_keyboard: choices.map(({ label }, index) => [{
+        text: label, callback_data: `${TIMEZONE_PICK}${index}`,
+      }]) } });
+  }
+  user.setup.choosing_timezone = false;
+  user.setup.timezone_candidate = choices[0].zone;
+  await saveUser(env, chatId, user);
+  return reply(env, chatId, timezoneConfirmationText(choices[0].zone),
+    { reply_markup: timezoneConfirmationKeyboard() });
+}
+
+async function confirmTimezone(env, chatId) {
+  const user = await loadUser(env, chatId);
+  const timezone = user?.setup?.timezone_candidate;
+  if (!user || !timezone) {
+    return reply(env, chatId,
+      "That timezone choice expired. Send a city or IANA timezone again.");
+  }
+  const previous = user.timezone;
+  const wasActivated = !!user.setup.completed_at;
+  user.timezone = timezone;
+  user.setup.timezone_confirmed_at = new Date(Date.now()).toISOString();
+  updateSetup(user, {
+    currentStep: wasActivated ? "complete" : requiredSetupStep(user),
+  });
+  user.setup.choosing_timezone = false;
+  delete user.setup.timezone_candidate;
+  delete user.setup.timezone_choices;
+  await saveUser(env, chatId, user);
+  const times = (user.hours || []).map((hour) =>
+    `${String(hour).padStart(2, "0")}:00`).join(", ");
+  if (previous && previous !== timezone) {
+    return reply(env, chatId,
+      `✅ Timezone changed to <code>${esc(timezone)}</code>.\n` +
+      `Your Digest times remain ${times || "unset"} in local wall-clock time.`);
+  }
+  if (user.setup.current_step === "account") {
+    return reply(env, chatId,
+      `✅ Timezone confirmed: <code>${esc(timezone)}</code>.\n\n` +
+      "Continue Guided setup by adding a Watched account with /add @handle.");
+  }
+  return reply(env, chatId,
+    `✅ Timezone confirmed: <code>${esc(timezone)}</code>.\n\n` +
+    "<b>Guided setup · Step 3 of 3</b>\n" +
+    "Now choose your Digest time with /schedule 9.");
 }
 
 async function beginAccountValidation(env, chatId, input) {
@@ -584,7 +743,7 @@ async function handleAccountValidation(result, env) {
     const plan = await resolvePlan(env, chatId, user);
     user.sources = user.sources || [];
     if (user.sources.includes(handle)) {
-      user.setup.current_step = "timezone";
+      user.setup.current_step = requiredSetupStep(user);
       await saveUser(env, chatId, user);
       return reply(env, chatId,
         `${xlink(handle)} is already in your Watched accounts.\n` +
@@ -592,7 +751,7 @@ async function handleAccountValidation(result, env) {
         { reply_markup: setupAccountKeyboard() });
     }
     if (user.sources.length >= plan.limits.sources) {
-      user.setup.current_step = "timezone";
+      user.setup.current_step = requiredSetupStep(user);
       await saveUser(env, chatId, user);
       return reply(env, chatId,
         `${xlink(handle)} is readable, but your ${plan.limits.sources}-account ` +
@@ -600,7 +759,7 @@ async function handleAccountValidation(result, env) {
         { reply_markup: setupAccountKeyboard() });
     }
     user.sources.push(handle);
-    user.setup.current_step = "timezone";
+    user.setup.current_step = requiredSetupStep(user);
     await saveUser(env, chatId, user);
     return reply(env, chatId,
       `✅ ${xlink(handle)} is verified and now watched.\n` +
@@ -861,6 +1020,9 @@ async function handleMessage(msg, env, ctx) {
     if (user?.setup?.current_step === "account" || user?.setup?.adding_account) {
       return beginAccountValidation(env, chatId, msg.text);
     }
+    if (user?.setup?.current_step === "timezone" || user?.setup?.choosing_timezone) {
+      return beginTimezoneResolution(env, chatId, msg.text);
+    }
   }
 
   if (!msg.text) return;
@@ -883,22 +1045,19 @@ async function handleMessage(msg, env, ctx) {
         await registerFreeUser(env, chatId, plan);
         user = await loadUser(env, chatId);
       }
-      if (cmd === "/start" && !user?.sources?.length) {
+      const requiredStep = requiredSetupStep(user);
+      if (cmd === "/start" && requiredStep === "account") {
         const entry = user || userDefaults();
         updateSetup(entry, { currentStep: "account" });
         await saveUser(env, chatId, entry);
         await reply(env, chatId,
           planWelcome(plan) + "\n\n" + accountStepText(plan),
           { reply_markup: MENU });
-      } else if (cmd === "/start" && user?.sources?.length && !user?.timezone) {
-        updateSetup(user, { currentStep: "timezone" });
-        await saveUser(env, chatId, user);
-        await reply(env, chatId,
-          planWelcome(plan) + "\n\n<b>Guided setup · Step 2 of 3</b>\n\n" +
-          "Your first Watched account is ready. Choose your timezone to continue.",
-          { reply_markup: { inline_keyboard: [[
-            { text: "🌍 Choose timezone", callback_data: SETUP_TIMEZONE },
-          ]] } });
+      } else if (cmd === "/start" && requiredStep === "timezone") {
+        await showTimezoneStep(env, chatId, user, planWelcome(plan) + "\n\n");
+      } else if (cmd === "/start" && requiredStep === "digest_time" &&
+                 !user?.setup?.completed_at) {
+        await showDigestTimeStep(env, chatId, user, planWelcome(plan) + "\n\n");
       } else {
         const intro = cmd === "/start" ? planWelcome(plan) + "\n\n" : "";
         await reply(env, chatId, intro + HELP + (isAdmin ? ADMIN_HELP : ""),
@@ -1000,10 +1159,11 @@ async function handleMessage(msg, env, ctx) {
     }
 
     case "/timezone": {
-      if (!/^[A-Za-z_]+\/[A-Za-z_+-]+$/.test(arg)) {
-        return reply(env, chatId, "Usage: /timezone Europe/Kyiv (IANA name)");
+      if (!arg) {
+        return reply(env, chatId,
+          "Usage: /timezone Kyiv or /timezone Europe/Kyiv");
       }
-      return setField(env, chatId, (u) => { u.timezone = arg; }, `Timezone set to ${arg}`);
+      return beginTimezoneResolution(env, chatId, arg);
     }
 
     case "/limit": {
@@ -1155,10 +1315,44 @@ async function handleCallback(cb, env) {
   }
 
   if (cb.data === SETUP_TIMEZONE) {
-    await reply(env, chatId,
-      "<b>Guided setup · Step 2 of 3</b>\n\n" +
-      "Send your timezone as an IANA name, for example /timezone Europe/Kyiv.");
-    return answer("");
+    await answer("");
+    const user = (await loadUser(env, chatId)) || userDefaults();
+    return showTimezoneStep(env, chatId, user);
+  }
+
+  if (cb.data.startsWith(TIMEZONE_PICK)) {
+    await answer("");
+    const user = await loadUser(env, chatId);
+    const index = Number(cb.data.slice(TIMEZONE_PICK.length));
+    const choice = user?.setup?.timezone_choices?.[index];
+    if (!choice) {
+      return reply(env, chatId,
+        "That timezone choice expired. Send the city again.");
+    }
+    user.setup.timezone_candidate = choice.zone;
+    user.setup.choosing_timezone = false;
+    delete user.setup.timezone_choices;
+    updateSetup(user, { currentStep: "timezone" });
+    await saveUser(env, chatId, user);
+    return reply(env, chatId, timezoneConfirmationText(choice.zone),
+      { reply_markup: timezoneConfirmationKeyboard() });
+  }
+
+  if (cb.data === TIMEZONE_CONFIRM) {
+    await answer("");
+    return confirmTimezone(env, chatId);
+  }
+
+  if (cb.data === TIMEZONE_RETRY) {
+    await answer("");
+    const user = (await loadUser(env, chatId)) || userDefaults();
+    updateSetup(user, { currentStep: "timezone" });
+    user.setup.choosing_timezone = true;
+    delete user.setup.timezone_candidate;
+    delete user.setup.timezone_choices;
+    await saveUser(env, chatId, user);
+    return reply(env, chatId,
+      "Send a city such as Kyiv or an IANA timezone such as Europe/Kyiv.");
   }
 
   // 🫥 toggle: re-edit the preview so media (and text) are spoiler-blurred;
