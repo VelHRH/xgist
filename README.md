@@ -162,7 +162,8 @@ to also get admin commands in your autocomplete).
 ### 9. Configure yourself as the first user
 
 Open a private chat with your bot and send `/start`. Guided setup verifies each
-Watched account before saving it, then walks through timezone and Digest time.
+Watched account before saving it, confirms timezone, then activates one Free or
+up to six Pro daily Digest times.
 You can also use the setup commands directly; timezone accepts a familiar city
 or an exact IANA timezone and asks for confirmation before saving:
 

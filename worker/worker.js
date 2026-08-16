@@ -505,6 +505,10 @@ const SETUP_TIMEZONE = "setup:timezone";
 const TIMEZONE_CONFIRM = "timezone:confirm";
 const TIMEZONE_RETRY = "timezone:retry";
 const TIMEZONE_PICK = "timezone:pick:";
+const DIGEST_TIME_PICK = "digest-time:pick:";
+const DIGEST_TIME_DONE = "digest-time:done";
+const SETUP_CONNECT_CHANNEL = "setup:connect-channel";
+const SETUP_SKIP_CHANNEL = "setup:skip-channel";
 const CITY_TIMEZONE_CHOICES = {
   kyiv: [{ label: "Kyiv, Ukraine", zone: "Europe/Kyiv" }],
   kiev: [{ label: "Kyiv, Ukraine", zone: "Europe/Kyiv" }],
@@ -596,6 +600,106 @@ function timezoneConfirmationKeyboard() {
   ] };
 }
 
+function selectedDigestTimes(user) {
+  return [...new Set(user?.setup?.digest_time_choices || [])]
+    .filter((hour) => Number.isInteger(hour) && hour >= 0 && hour <= 23)
+    .sort((a, b) => a - b);
+}
+
+function formatDigestTimes(hours) {
+  return (hours || []).map((hour) =>
+    `${String(hour).padStart(2, "0")}:00`).join(", ");
+}
+
+function digestTimeView(user, plan) {
+  const selected = new Set(selectedDigestTimes(user));
+  const keyboard = [];
+  for (let start = 0; start < 24; start += 4) {
+    keyboard.push(Array.from({ length: 4 }, (_, index) => {
+      const hour = start + index;
+      return {
+        text: `${selected.has(hour) ? "✓ " : ""}${String(hour).padStart(2, "0")}:00`,
+        callback_data: `${DIGEST_TIME_PICK}${hour}`,
+      };
+    }));
+  }
+  if (plan.tier === "pro") {
+    keyboard.push([{ text: "Done", callback_data: DIGEST_TIME_DONE }]);
+  }
+  const entitlement = plan.tier === "pro"
+    ? `Your Pro plan includes up to ${plan.limits.hours} active daily Digest times.`
+    : "Your Free plan includes exactly one active daily Digest time.";
+  return {
+    text: "<b>Guided setup · Step 3 of 3</b>\n\n" +
+      `Choose in <code>${esc(user.timezone)}</code>. ${entitlement}\n` +
+      "Delivery normally begins within a few minutes after the selected hour.",
+    reply_markup: { inline_keyboard: keyboard },
+  };
+}
+
+function activationPlanName(plan) {
+  if (plan.source === "trial") return "XGist Pro Trial";
+  if (plan.source === "courtesy") return "XGist Pro · Courtesy access";
+  if (plan.source === "administrator") return "XGist Pro · Administrator";
+  if (plan.tier === "pro") return "XGist Pro";
+  return "XGist Free";
+}
+
+function activationKeyboard() {
+  return { inline_keyboard: [[
+    { text: "Connect channel", callback_data: SETUP_CONNECT_CHANNEL },
+    { text: "Not now", callback_data: SETUP_SKIP_CHANNEL },
+  ]] };
+}
+
+async function activateWithDigestTimes(env, chatId, hours, from) {
+  const user = (await loadUser(env, chatId)) || userDefaults();
+  const plan = await resolvePlan(env, chatId, user);
+  const wasActivated = !!user.setup?.completed_at;
+  const selected = [...new Set(hours)].sort((a, b) => a - b);
+  if (!selected.length || selected.length > plan.limits.hours) {
+    return reply(env, chatId,
+      `Your plan includes ${plan.limits.hours} active daily Digest time` +
+      `${plan.limits.hours === 1 ? "" : "s"}.`);
+  }
+  user.hours = selected;
+  updateSetup(user);
+  if (!user.sources?.length || !user.setup.timezone_confirmed_at) {
+    user.setup.current_step = requiredSetupStep(user);
+    user.setup.digest_time_choices = selected;
+    delete user.setup.digest_time_confirmed_at;
+    await saveUser(env, chatId, user);
+    const times = formatDigestTimes(selected);
+    return reply(env, chatId,
+      `🕘 Digest times saved: ${times}. Finish the earlier Guided setup steps ` +
+      "before confirming activation.");
+  }
+  const now = new Date(Date.now()).toISOString();
+  user.setup.digest_time_confirmed_at = now;
+  if (wasActivated) {
+    user.setup.current_step = "complete";
+    user.setup.last_activity_at = now;
+    delete user.setup.digest_time_choices;
+    await saveUser(env, chatId, user);
+    const times = formatDigestTimes(selected);
+    return reply(env, chatId,
+      `🕘 Digest times updated: ${times} in <code>${esc(user.timezone)}</code>.`);
+  }
+  user.setup.completed_at = user.setup.completed_at || now;
+  user.setup.current_step = "complete";
+  user.setup.last_activity_at = now;
+  user.setup.reminder_consumed = false;
+  delete user.setup.digest_time_choices;
+  await saveUser(env, chatId, user);
+  const name = from?.first_name ? `${esc(from.first_name)}, ` : "";
+  const times = formatDigestTimes(selected);
+  return reply(env, chatId,
+    `✅ <b>Setup complete · ${activationPlanName(plan)}</b>\n\n` +
+    `${name}your Digest is active at ${times} in <code>${esc(user.timezone)}</code>.\n` +
+    "Private Previews will arrive here. A Publishing channel is optional.",
+    { reply_markup: activationKeyboard() });
+}
+
 async function showTimezoneStep(env, chatId, user, intro = "") {
   updateSetup(user, { currentStep: "timezone" });
   if (!user.setup.timezone_candidate && user.timezone) {
@@ -616,9 +720,10 @@ async function showTimezoneStep(env, chatId, user, intro = "") {
 async function showDigestTimeStep(env, chatId, user, intro = "") {
   updateSetup(user, { currentStep: "digest_time" });
   await saveUser(env, chatId, user);
-  return reply(env, chatId,
-    intro + "<b>Guided setup · Step 3 of 3</b>\n\n" +
-    "Choose the local hour when you want your Digest with /schedule 9.");
+  const plan = await resolvePlan(env, chatId, user);
+  const view = digestTimeView(user, plan);
+  return reply(env, chatId, intro + view.text,
+    { reply_markup: view.reply_markup });
 }
 
 async function beginTimezoneResolution(env, chatId, input) {
@@ -672,9 +777,8 @@ async function confirmTimezone(env, chatId) {
   delete user.setup.timezone_candidate;
   delete user.setup.timezone_choices;
   await saveUser(env, chatId, user);
-  const times = (user.hours || []).map((hour) =>
-    `${String(hour).padStart(2, "0")}:00`).join(", ");
-  if (previous && previous !== timezone) {
+  const times = formatDigestTimes(user.hours);
+  if (wasActivated && previous && previous !== timezone) {
     return reply(env, chatId,
       `✅ Timezone changed to <code>${esc(timezone)}</code>.\n` +
       `Your Digest times remain ${times || "unset"} in local wall-clock time.`);
@@ -684,10 +788,8 @@ async function confirmTimezone(env, chatId) {
       `✅ Timezone confirmed: <code>${esc(timezone)}</code>.\n\n` +
       "Continue Guided setup by adding a Watched account with /add @handle.");
   }
-  return reply(env, chatId,
-    `✅ Timezone confirmed: <code>${esc(timezone)}</code>.\n\n` +
-    "<b>Guided setup · Step 3 of 3</b>\n" +
-    "Now choose your Digest time with /schedule 9.");
+  return showDigestTimeStep(env, chatId, user,
+    `✅ Timezone confirmed: <code>${esc(timezone)}</code>.\n\n`);
 }
 
 async function beginAccountValidation(env, chatId, input) {
@@ -1153,9 +1255,7 @@ async function handleMessage(msg, env, ctx) {
           `Your plan includes up to ${max} digest time(s) per day. ` +
           `Pro gives you ${LIMITS.pro.hours} — /pro`);
       }
-      return setField(env, chatId, (u) => { u.hours = hours; },
-        `🕘 Digest schedule: ${hours.map((h) => String(h).padStart(2, "0") + ":00").join(", ")} (your timezone)` +
-        setupHints({ sources: u0?.sources }));
+      return activateWithDigestTimes(env, chatId, hours, msg.from);
     }
 
     case "/timezone": {
@@ -1353,6 +1453,78 @@ async function handleCallback(cb, env) {
     await saveUser(env, chatId, user);
     return reply(env, chatId,
       "Send a city such as Kyiv or an IANA timezone such as Europe/Kyiv.");
+  }
+
+  if (cb.data.startsWith(DIGEST_TIME_PICK)) {
+    await answer("");
+    const hour = Number(cb.data.slice(DIGEST_TIME_PICK.length));
+    const user = await loadUser(env, chatId);
+    if (!user || !Number.isInteger(hour) || hour < 0 || hour > 23) return;
+    const plan = await resolvePlan(env, chatId, user);
+    if (plan.tier === "free") {
+      await tg(env, "editMessageReplyMarkup", {
+        chat_id: chatId, message_id: controlId,
+        reply_markup: { inline_keyboard: [] },
+      });
+      return activateWithDigestTimes(env, chatId, [hour], cb.from);
+    }
+    const selected = new Set(selectedDigestTimes(user));
+    if (selected.has(hour)) selected.delete(hour);
+    else if (selected.size < plan.limits.hours) selected.add(hour);
+    else {
+      return reply(env, chatId,
+        `Your Pro plan includes up to ${plan.limits.hours} active daily Digest times.`);
+    }
+    updateSetup(user, { currentStep: "digest_time" });
+    user.setup.digest_time_choices = [...selected].sort((a, b) => a - b);
+    await saveUser(env, chatId, user);
+    const view = digestTimeView(user, plan);
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId, text: view.text,
+      parse_mode: "HTML", reply_markup: view.reply_markup,
+      link_preview_options: { is_disabled: true },
+    });
+  }
+
+  if (cb.data === DIGEST_TIME_DONE) {
+    await answer("");
+    const user = await loadUser(env, chatId);
+    const hours = selectedDigestTimes(user);
+    if (!hours.length) {
+      return reply(env, chatId, "Select at least one Digest time before tapping Done.");
+    }
+    await tg(env, "editMessageReplyMarkup", {
+      chat_id: chatId, message_id: controlId,
+      reply_markup: { inline_keyboard: [] },
+    });
+    return activateWithDigestTimes(env, chatId, hours, cb.from);
+  }
+
+  if (cb.data === SETUP_CONNECT_CHANNEL) {
+    await answer("");
+    const user = await loadUser(env, chatId);
+    if (user) {
+      user.setup.reminder_consumed = true;
+      user.setup.channel_choice = "connect";
+      await saveUser(env, chatId, user);
+    }
+    return reply(env, chatId,
+      "Add me to your Publishing channel as an admin, then send " +
+      "/channel @yourchannel. For a private channel, forward me a message from it.");
+  }
+
+  if (cb.data === SETUP_SKIP_CHANNEL) {
+    await answer("");
+    const user = await loadUser(env, chatId);
+    if (user) {
+      user.setup.reminder_consumed = true;
+      user.setup.channel_choice = "not_now";
+      user.setup.channel_skipped_at = new Date(Date.now()).toISOString();
+      await saveUser(env, chatId, user);
+    }
+    return reply(env, chatId,
+      "✅ Setup complete. Private Previews will arrive here; connect a Publishing " +
+      "channel later with /channel whenever you want.");
   }
 
   // 🫥 toggle: re-edit the preview so media (and text) are spoiler-blurred;

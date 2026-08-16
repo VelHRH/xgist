@@ -83,6 +83,8 @@ def _due_slot(cfg: dict, user_state: dict, now: datetime) -> str | None:
         return None
     if not cfg.get("setup", {}).get("timezone_confirmed_at"):
         return None
+    if not cfg.get("setup", {}).get("digest_time_confirmed_at"):
+        return None
     try:
         tz = ZoneInfo(cfg.get("timezone") or DEFAULT_TZ)
     except Exception:
