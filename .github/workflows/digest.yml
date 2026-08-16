@@ -21,6 +21,10 @@ on:
         description: "Build one Thread-post Preview from this X link (target chat id via only_user)"
         type: string
         default: ""
+      account_handle:
+        description: "Validate one X account for Guided setup (target chat id via only_user)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -28,7 +32,7 @@ permissions:
 concurrency:
   # On-demand thread fetches run in their own per-user group so a Preview never
   # queues behind the hourly Digest (and two threads for one user serialize).
-  group: ${{ github.event.inputs.thread_url && format('thread-{0}', github.event.inputs.only_user) || 'digest' }}
+  group: ${{ github.event.inputs.account_handle && format('account-{0}', github.event.inputs.only_user) || github.event.inputs.thread_url && format('thread-{0}', github.event.inputs.only_user) || 'digest' }}
   cancel-in-progress: false
 
 jobs:
@@ -62,5 +66,8 @@ jobs:
           FORCE_ALL: ${{ inputs.force == true && '1' || '' }}
           FORCE_USER: ${{ inputs.only_user }}
           THREAD_URL: ${{ inputs.thread_url }}
+          ACCOUNT_HANDLE: ${{ inputs.account_handle }}
+          WORKER_URL: ${{ vars.WORKER_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           DEFAULT_TZ: ${{ vars.DEFAULT_TZ || 'Europe/Kyiv' }}
-        run: python -m pipeline.digest
+        run: ${{ inputs.account_handle && 'python -m pipeline.validate_account' || 'python -m pipeline.digest' }}
