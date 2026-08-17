@@ -5,8 +5,12 @@ import worker from "./worker.js";
 
 const DAY = 86400000;
 
-function createHarness({ users = {}, whitelist = [], promo = [], githubStatus = 204 } = {}) {
+function createHarness({
+  users = {}, states = {}, whitelist = [], promo = [], githubStatus = 204,
+  telegramResults = {},
+} = {}) {
   const values = new Map();
+  const lists = new Map();
   const sets = new Map([
     ["uids", new Set(Object.keys(users))],
     ["whitelist", new Set(whitelist.map(String))],
@@ -15,8 +19,12 @@ function createHarness({ users = {}, whitelist = [], promo = [], githubStatus = 
   for (const [id, user] of Object.entries(users)) {
     values.set(`user:${id}`, JSON.stringify(user));
   }
+  for (const [id, state] of Object.entries(states)) {
+    values.set(`state:${id}`, JSON.stringify(state));
+  }
   const telegram = [];
   const github = [];
+  const telegramCounts = new Map();
   let messageId = 1;
 
   const redis = (cmd) => {
@@ -48,6 +56,21 @@ function createHarness({ users = {}, whitelist = [], promo = [], githubStatus = 
     if (name === "SCARD") return sets.get(key)?.size || 0;
     if (name === "SMEMBERS") return [...(sets.get(key) || [])];
     if (name === "MGET") return args.map((item) => values.get(item) ?? null);
+    if (name === "RPUSH") {
+      const list = lists.get(key) || [];
+      list.push(...args);
+      lists.set(key, list);
+      return list.length;
+    }
+    if (name === "LTRIM") {
+      const list = lists.get(key) || [];
+      const start = Number(args[0]);
+      const stop = Number(args[1]);
+      const from = start < 0 ? Math.max(list.length + start, 0) : start;
+      const to = stop < 0 ? list.length + stop + 1 : stop + 1;
+      lists.set(key, list.slice(from, to));
+      return "OK";
+    }
     throw new Error(`Unsupported Redis command: ${name}`);
   };
 
@@ -61,6 +84,21 @@ function createHarness({ users = {}, whitelist = [], promo = [], githubStatus = 
       const method = target.split("/").pop();
       const params = JSON.parse(options.body);
       telegram.push({ method, params });
+      const call = telegramCounts.get(method) || 0;
+      telegramCounts.set(method, call + 1);
+      const configured = telegramResults[method];
+      const response = typeof configured === "function"
+        ? configured(params, call)
+        : Array.isArray(configured) ? configured[Math.min(call, configured.length - 1)]
+          : configured;
+      if (response) return Response.json(response);
+      if (method === "getMe") return Response.json({ ok: true, result: { id: 999 } });
+      if (method === "getChatMember") {
+        return Response.json({
+          ok: true,
+          result: { status: "administrator", can_post_messages: true },
+        });
+      }
       const result = method === "createInvoiceLink"
         ? "https://invoice.test/pro" : { message_id: messageId++ };
       return Response.json({ ok: true, result });
@@ -78,6 +116,10 @@ function createHarness({ users = {}, whitelist = [], promo = [], githubStatus = 
     telegram,
     user(id) {
       const raw = values.get(`user:${id}`);
+      return raw ? JSON.parse(raw) : null;
+    },
+    state(id) {
+      const raw = values.get(`state:${id}`);
       return raw ? JSON.parse(raw) : null;
     },
   };
@@ -788,4 +830,180 @@ test("skipping the optional Publishing channel is a successful terminal path", a
   assert.match(sentTo(harness, 430).at(-1), /connect a Publishing channel later/);
   assert.deepEqual(harness.telegram.slice(-2).map(({ method }) => method),
     ["answerCallbackQuery", "sendMessage"]);
+});
+
+test("public and forwarded private Publishing channels are verified before saving", async () => {
+  const publicChannel = createHarness({ users: { 501: { channel: null } } });
+  await sendUpdate(publicChannel, message(501, "/channel @publicchannel"));
+
+  assert.equal(publicChannel.user(501).channel, "@publicchannel");
+  assert.equal(publicChannel.user(501).channel_verified.id, "@publicchannel");
+  assert.equal(publicChannel.user(501).channel_candidate, undefined);
+  assert.deepEqual(publicChannel.telegram.map(({ method }) => method),
+    ["getMe", "getChatMember", "sendMessage"]);
+  assert.deepEqual(publicChannel.telegram[1].params,
+    { chat_id: "@publicchannel", user_id: 999 });
+  assert.match(sentTo(publicChannel, 501)[0], /Publishing channel verified/);
+
+  const privateChannel = createHarness({ users: { 502: { channel: null } } });
+  const forwarded = message(502, "forwarded post");
+  forwarded.message.forward_origin = {
+    type: "channel", chat: { id: -1001234567890, title: "Private News" },
+  };
+  await sendUpdate(privateChannel, forwarded);
+
+  assert.equal(privateChannel.user(502).channel, -1001234567890);
+  assert.deepEqual(privateChannel.telegram[1].params,
+    { chat_id: -1001234567890, user_id: 999 });
+  assert.match(sentTo(privateChannel, 502)[0], /Private News/);
+});
+
+test("posting to a verified channel answers before publishing", async () => {
+  const harness = createHarness({
+    users: {
+      503: { channel: "@verified", channel_verified: { id: "@verified" } },
+    },
+    states: {
+      503: { pending: { "30": { source: "naval", text: "Preview" } } },
+    },
+  });
+  await sendUpdate(harness, callback(503, "p:30"));
+
+  assert.deepEqual(harness.telegram.map(({ method }) => method),
+    ["answerCallbackQuery", "copyMessages", "editMessageText"]);
+});
+
+test("channel verification gives permission-specific repairs and retries", async () => {
+  const cases = [
+    {
+      id: 510,
+      initial: { ok: true, result: { status: "left" } },
+      expected: /can’t access.*Add me.*administrator.*Post Messages/s,
+    },
+    {
+      id: 511,
+      initial: { ok: true, result: { status: "member" } },
+      expected: /not an administrator.*Promote me.*Post Messages/s,
+    },
+    {
+      id: 512,
+      initial: {
+        ok: true,
+        result: { status: "administrator", can_post_messages: false },
+      },
+      expected: /can’t post messages.*Enable.*Post Messages/s,
+    },
+  ];
+  for (const item of cases) {
+    let repaired = false;
+    const harness = createHarness({
+      users: { [item.id]: { channel: null } },
+      telegramResults: {
+        getChatMember: () => repaired ? {
+          ok: true,
+          result: { status: "administrator", can_post_messages: true },
+        } : item.initial,
+      },
+    });
+    await sendUpdate(harness, message(item.id, "/channel @repairme"));
+
+    assert.equal(harness.user(item.id).channel, null);
+    assert.equal(harness.user(item.id).channel_candidate.id, "@repairme");
+    const repair = harness.telegram.at(-1);
+    assert.match(repair.params.text, item.expected);
+    assert.equal(repair.params.reply_markup.inline_keyboard[0][0].callback_data,
+      "channel:retry");
+
+    repaired = true;
+    const beforeRetry = harness.telegram.length;
+    await sendUpdate(harness, callback(item.id, "channel:retry"));
+    assert.equal(harness.user(item.id).channel, "@repairme");
+    assert.deepEqual(harness.telegram.slice(beforeRetry).map(({ method }) => method),
+      ["answerCallbackQuery", "getMe", "getChatMember", "sendMessage"]);
+  }
+});
+
+test("stored channels cannot publish until their permissions are verified", async () => {
+  const states = [
+    { status: "left" },
+    { status: "member" },
+    { status: "administrator", can_post_messages: false },
+  ];
+  for (const [index, result] of states.entries()) {
+    const id = 515 + index;
+    const harness = createHarness({
+      users: { [id]: { channel: "@legacy" } },
+      states: {
+        [id]: { pending: { "40": { source: "naval", text: "Preview" } } },
+      },
+      telegramResults: {
+        getChatMember: { ok: true, result },
+      },
+    });
+    await sendUpdate(harness, callback(id, "p:40"));
+
+    assert.equal(harness.user(id).channel_verified, undefined);
+    assert.equal(harness.user(id).channel_candidate.id, "@legacy");
+    assert.equal(harness.user(id).publishing_intent.ids, "40");
+    assert.deepEqual(harness.telegram.map(({ method }) => method),
+      ["answerCallbackQuery", "getMe", "getChatMember", "sendMessage"]);
+    assert.equal(harness.telegram.some(({ method }) => method === "copyMessages"), false);
+  }
+});
+
+test("Post without a channel preserves the Preview and requires final confirmation", async () => {
+  const pending = {
+    "10": { source: "naval", text: "original", caption: "Original Preview" },
+  };
+  const harness = createHarness({
+    users: { 520: { channel: null } }, states: { 520: { pending } },
+  });
+  await sendUpdate(harness, callback(520, "p:10,11"));
+
+  assert.equal(harness.user(520).publishing_intent.ids, "10,11");
+  assert.equal(harness.user(520).publishing_intent.control, 1);
+  assert.equal(harness.user(520).publishing_intent.controls
+    .inline_keyboard[0][0].callback_data, "p:10,11");
+  assert.deepEqual(harness.state(520).pending, pending);
+  assert.deepEqual(harness.telegram.map(({ method }) => method),
+    ["answerCallbackQuery", "sendMessage"]);
+  assert.match(sentTo(harness, 520)[0], /exact Preview is saved/);
+
+  await sendUpdate(harness, message(520, "/channel @destination"));
+  assert.equal(harness.telegram.some(({ method }) => method === "copyMessages"), false);
+  const confirmation = harness.telegram.find(({ method, params }) =>
+    method === "editMessageReplyMarkup" && params.message_id === 1);
+  assert.deepEqual(confirmation.params.reply_markup.inline_keyboard[0]
+    .map(({ text }) => text), ["Publish now", "Not now"]);
+  assert.deepEqual(harness.state(520).pending, pending);
+
+  const beforePublish = harness.telegram.length;
+  await sendUpdate(harness, callback(520, "channel:publish"));
+  assert.deepEqual(harness.telegram.slice(beforePublish).map(({ method }) => method),
+    ["answerCallbackQuery", "copyMessages", "editMessageText"]);
+  assert.deepEqual(harness.telegram[beforePublish + 1].params, {
+    chat_id: "@destination", from_chat_id: 520, message_ids: [10, 11],
+  });
+  assert.equal(harness.user(520).publishing_intent, undefined);
+});
+
+test("declining final publication restores the Preview controls", async () => {
+  const pending = {
+    "20": { source: "naval", text: "original", caption: "Original Preview" },
+  };
+  const harness = createHarness({
+    users: { 530: { channel: null } }, states: { 530: { pending } },
+  });
+  await sendUpdate(harness, callback(530, "p:20"));
+  await sendUpdate(harness, message(530, "/channel @destination"));
+  const beforeCancel = harness.telegram.length;
+  await sendUpdate(harness, callback(530, "channel:not-now"));
+
+  assert.deepEqual(harness.telegram.slice(beforeCancel).map(({ method }) => method),
+    ["answerCallbackQuery", "editMessageReplyMarkup", "sendMessage"]);
+  const controls = harness.telegram[beforeCancel + 1].params.reply_markup;
+  assert.equal(controls.inline_keyboard[0][0].callback_data, "p:20");
+  assert.equal(harness.user(530).publishing_intent, undefined);
+  assert.deepEqual(harness.state(530).pending, pending);
+  assert.equal(harness.telegram.some(({ method }) => method === "copyMessages"), false);
 });

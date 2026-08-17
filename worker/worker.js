@@ -509,6 +509,9 @@ const DIGEST_TIME_PICK = "digest-time:pick:";
 const DIGEST_TIME_DONE = "digest-time:done";
 const SETUP_CONNECT_CHANNEL = "setup:connect-channel";
 const SETUP_SKIP_CHANNEL = "setup:skip-channel";
+const CHANNEL_RETRY = "channel:retry";
+const CHANNEL_PUBLISH = "channel:publish";
+const CHANNEL_NOT_NOW = "channel:not-now";
 const CITY_TIMEZONE_CHOICES = {
   kyiv: [{ label: "Kyiv, Ukraine", zone: "Europe/Kyiv" }],
   kiev: [{ label: "Kyiv, Ukraine", zone: "Europe/Kyiv" }],
@@ -962,6 +965,67 @@ function userDefaults() {
            limit: 3, interests: null, style: null, language: "en", paused: false };
 }
 
+function channelRetryKeyboard() {
+  return { inline_keyboard: [[
+    { text: "Try again", callback_data: CHANNEL_RETRY },
+  ]] };
+}
+
+function channelConfirmationKeyboard() {
+  return { inline_keyboard: [[
+    { text: "Publish now", callback_data: CHANNEL_PUBLISH },
+    { text: "Not now", callback_data: CHANNEL_NOT_NOW },
+  ]] };
+}
+
+async function verifyPublishingChannel(env, chatId, candidate) {
+  const user = (await loadUser(env, chatId)) || userDefaults();
+  user.channel_candidate = candidate;
+  await saveUser(env, chatId, user);
+  const label = esc(String(candidate.title || candidate.id));
+  const bot = await tg(env, "getMe", {});
+  const membership = bot.ok && await tg(env, "getChatMember", {
+    chat_id: candidate.id, user_id: bot.result.id,
+  });
+  let repair = null;
+  if (!membership?.ok || ["left", "kicked"].includes(membership.result?.status)) {
+    repair = `I can’t access ${label}. Add me to that Publishing channel as an ` +
+      "administrator with <b>Post Messages</b> enabled, then tap Try again.";
+  } else if (membership.result.status !== "administrator") {
+    repair = `I’m in ${label}, but I’m not an administrator. Promote me to ` +
+      "administrator, enable <b>Post Messages</b>, then tap Try again.";
+  } else if (!membership.result.can_post_messages) {
+    repair = `I’m an administrator in ${label}, but I can’t post messages. ` +
+      "Enable <b>Post Messages</b>, then tap Try again.";
+  }
+  if (repair) {
+    return reply(env, chatId, repair,
+      { reply_markup: channelRetryKeyboard() });
+  }
+  user.channel = candidate.id;
+  user.channel_verified = {
+    id: candidate.id, at: new Date(Date.now()).toISOString(),
+  };
+  delete user.channel_candidate;
+  if (user.setup) {
+    user.setup.reminder_consumed = true;
+    user.setup.channel_choice = "connected";
+    user.setup.channel_connected_at = new Date(Date.now()).toISOString();
+  }
+  await saveUser(env, chatId, user);
+  if (user.publishing_intent) {
+    await tg(env, "editMessageReplyMarkup", {
+      chat_id: chatId, message_id: user.publishing_intent.control,
+      reply_markup: channelConfirmationKeyboard(),
+    });
+    return reply(env, chatId,
+      `✅ Publishing channel verified: ${label}. Return to the preserved Preview ` +
+      "and choose <b>Publish now</b> or <b>Not now</b>.",
+      { reply_to_message_id: user.publishing_intent.control });
+  }
+  return reply(env, chatId, `✅ Publishing channel verified: ${label}.`);
+}
+
 /** The /settings body + its inline pause/resume toggle. Shared between the
  *  /settings command and the toggle callback so both render identically and
  *  the callback can edit the message in place. */
@@ -1049,13 +1113,10 @@ async function handleMessage(msg, env, ctx) {
   if (msg.chat.type !== "private") return;
   const chatId = msg.chat.id;
 
-  // Forwarded from a private channel → capture its numeric id as the target.
   const fwd = msg.forward_origin;
   if (fwd?.type === "channel") {
-    await setField(env, chatId, (u) => { u.channel = fwd.chat.id; },
-      `📢 Channel set to "${esc(fwd.chat.title)}". ` +
-      `Make sure I'm an admin there with "Post messages" permission.`);
-    return;
+    return verifyPublishingChannel(env, chatId,
+      { id: fwd.chat.id, title: fwd.chat.title });
   }
 
   // Payment confirmation arrives as a service message, not a command.
@@ -1214,10 +1275,7 @@ async function handleMessage(msg, env, ctx) {
           "Usage: /channel @yourchannel\n(or forward me a message from a private channel)");
       }
       const value = arg.startsWith("@") ? arg : Number(arg);
-      const u0 = await loadUser(env, chatId);
-      return setField(env, chatId, (u) => { u.channel = value; },
-        `📢 Channel set to ${esc(arg)}. Make sure I'm an admin there with "Post messages" permission.` +
-        setupHints({ sources: u0?.sources }));
+      return verifyPublishingChannel(env, chatId, { id: value, title: arg });
     }
 
     case "/add": {
@@ -1392,6 +1450,25 @@ function controlKeyboard(idsStr, spoilerOn = false) {
   ] };
 }
 
+async function publishPreview(env, chatId, controlId, idsStr, user) {
+  const ids = idsStr.split(",").map(Number).sort((a, b) => a - b);
+  const result = await tg(env, "copyMessages", {
+    chat_id: user.channel, from_chat_id: chatId, message_ids: ids,
+  });
+  if (!result.ok) {
+    await reply(env, chatId,
+      `Publishing failed: ${esc(result.description || "unknown error")}. ` +
+      "The Preview is still available.");
+    return false;
+  }
+  const dest = typeof user.channel === "string" ? user.channel : "your channel";
+  await tg(env, "editMessageText", {
+    chat_id: chatId, message_id: controlId, text: `✅ Posted to ${dest}`,
+  });
+  await recordFeedback(env, chatId, idsStr, "approved");
+  return true;
+}
+
 /** Current hour (0-23) in an IANA timezone. */
 const hourIn = (tz) => Number(new Intl.DateTimeFormat("en-GB", {
   timeZone: tz, hour: "2-digit", hourCycle: "h23",
@@ -1525,6 +1602,45 @@ async function handleCallback(cb, env) {
     return reply(env, chatId,
       "✅ Setup complete. Private Previews will arrive here; connect a Publishing " +
       "channel later with /channel whenever you want.");
+  }
+
+  if (cb.data === CHANNEL_RETRY) {
+    await answer("");
+    const candidate = (await loadUser(env, chatId))?.channel_candidate;
+    if (!candidate) {
+      return reply(env, chatId,
+        "That channel setup expired. Send /channel @yourchannel or forward a private-channel message.");
+    }
+    return verifyPublishingChannel(env, chatId, candidate);
+  }
+
+  if (cb.data === CHANNEL_NOT_NOW) {
+    await answer("");
+    const user = await loadUser(env, chatId);
+    const intent = user?.publishing_intent;
+    if (!intent) return;
+    delete user.publishing_intent;
+    await saveUser(env, chatId, user);
+    await tg(env, "editMessageReplyMarkup", {
+      chat_id: chatId, message_id: intent.control,
+      reply_markup: intent.controls || controlKeyboard(intent.ids),
+    });
+    return reply(env, chatId,
+      "Not published. The Preview is still available with its existing controls.");
+  }
+
+  if (cb.data === CHANNEL_PUBLISH) {
+    await answer("");
+    const user = await loadUser(env, chatId);
+    const intent = user?.publishing_intent;
+    if (!intent || !user.channel) {
+      return reply(env, chatId,
+        "That publishing confirmation expired. Use ✅ Post on the Preview again.");
+    }
+    if (!await publishPreview(env, chatId, intent.control, intent.ids, user)) return;
+    delete user.publishing_intent;
+    await saveUser(env, chatId, user);
+    return;
   }
 
   // 🫥 toggle: re-edit the preview so media (and text) are spoiler-blurred;
@@ -1725,25 +1841,36 @@ async function handleCallback(cb, env) {
   }
 
   if (cb.data.startsWith("p:")) {
-    const ids = cb.data.slice(2).split(",").map(Number).sort((a, b) => a - b);
+    const idsStr = cb.data.slice(2);
+    const ids = idsStr.split(",").map(Number).sort((a, b) => a - b);
     const user = await loadUser(env, chatId);
-    if (!user?.channel) return answer("Set your channel first: /channel @name", true);
-
-    // Future non-Telegram targets (e.g. Instagram) would branch here into a
-    // GitHub workflow_dispatch instead of copyMessages.
-    const result = await tg(env, "copyMessages", {
-      chat_id: user.channel,
-      from_chat_id: chatId,
-      message_ids: ids,
-    });
-    if (!result.ok) {
-      return answer(`Failed: ${result.description}. Am I an admin of ${user.channel}?`, true);
+    if (!user?.channel || user.channel_verified?.id !== user.channel) {
+      await answer("");
+      const entry = (await loadPending(env, chatId))?.[String(ids[0])];
+      if (!entry) {
+        return reply(env, chatId,
+          "Preview data isn’t synced yet — tap ✅ Post again in a moment.");
+      }
+      const pendingUser = user || userDefaults();
+      pendingUser.publishing_intent = {
+        ids: idsStr, control: controlId,
+        controls: cb.message.reply_markup || controlKeyboard(idsStr),
+      };
+      await saveUser(env, chatId, pendingUser);
+      if (user?.channel) {
+        return verifyPublishingChannel(env, chatId,
+          { id: user.channel, title: String(user.channel) });
+      }
+      return reply(env, chatId,
+        "This exact Preview is saved. Add me to your Publishing channel as an " +
+        "administrator with <b>Post Messages</b> enabled, then send " +
+        "/channel @yourchannel. For a private channel, forward me a message from it.");
     }
-    const dest = typeof user.channel === "string" ? user.channel : "your channel";
-    await tg(env, "editMessageText",
-      { chat_id: chatId, message_id: controlId, text: `✅ Posted to ${dest}` });
-    await recordFeedback(env, chatId, cb.data.slice(2), "approved");
-    return answer("Posted!");
+
+    await answer("");
+
+    await publishPreview(env, chatId, controlId, idsStr, user);
+    return;
   }
 
   return answer("");
