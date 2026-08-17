@@ -34,6 +34,17 @@ function createHarness({
       values.set(key, args[0]);
       return "OK";
     }
+    if (name === "INCR") {
+      const value = Number(values.get(key) || 0) + 1;
+      values.set(key, String(value));
+      return value;
+    }
+    if (name === "DECR") {
+      const value = Number(values.get(key) || 0) - 1;
+      values.set(key, String(value));
+      return value;
+    }
+    if (name === "EXPIRE") return values.has(key) ? 1 : 0;
     if (name === "SADD") {
       const set = sets.get(key) || new Set();
       sets.set(key, set);
@@ -248,6 +259,111 @@ test("help and setup hints treat the Publishing channel as optional", async () =
   const replies = sentTo(harness, 110);
   assert.match(replies[0], /Setup — 2 steps/);
   assert.match(replies[0], /Optional: \/channel @yourchannel/);
+});
+
+test("a pasted status link dispatches a thread Preview and enforces the Free quota", async () => {
+  const harness = createHarness({
+    users: { 111: { sources: [], hours: [9] } },
+    promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
+  });
+  await sendUpdate(harness, message(111,
+    "Please use https://mobile.twitter.com/Naval/status/12345?ref=home#post thanks"));
+  await sendUpdate(harness, message(111, "https://www.x.com/naval/status/67890"));
+
+  assert.deepEqual(harness.github[0].inputs, {
+    thread_url: "https://mobile.twitter.com/Naval/status/12345",
+    only_user: "111",
+  });
+  assert.equal(harness.github.length, 1);
+  assert.match(sentTo(harness, 111)[0], /Fetching that thread/);
+  assert.match(sentTo(harness, 111)[1], /thread limit \(1\/day\)/);
+});
+
+test("Pro and administrator thread quotas use their plan limits", async () => {
+  const paidUntil = new Date(Date.now() + DAY).toISOString();
+  const pro = createHarness({
+    users: { 112: { sources: [], hours: [9], paid_until: paidUntil } },
+  });
+  for (let index = 0; index < 6; index++) {
+    await sendUpdate(pro, message(112, `https://x.com/user/status/${10000 + index}`));
+  }
+  assert.equal(pro.github.length, 5);
+  assert.match(sentTo(pro, 112).at(-1), /thread limit \(5\/day\)/);
+
+  const admin = createHarness({ users: { 113: { sources: [], hours: [9] } } });
+  for (let index = 0; index < 6; index++) {
+    await sendUpdate(admin, message(113, `https://x.com/user/status/${20000 + index}`),
+      { ADMIN_ID: "113" });
+  }
+  assert.equal(admin.github.length, 6);
+  assert.equal(sentTo(admin, 113).every((text) => /Fetching that thread/.test(text)), true);
+});
+
+test("failed thread dispatches refund quota", async () => {
+  const harness = createHarness({
+    users: { 114: { sources: [], hours: [9] } },
+    promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
+    githubStatus: 500,
+  });
+  await sendUpdate(harness, message(114, "https://x.com/user/status/30001"));
+  await sendUpdate(harness, message(114, "https://x.com/user/status/30002"));
+
+  assert.equal(harness.github.length, 2);
+  assert.equal(sentTo(harness, 114).every((text) => /HTTP 500/.test(text)), true);
+});
+
+test("a pasted status link during Edit is edit content and does not consume quota", async () => {
+  const now = Date.parse("2026-08-17T12:00:00.000Z");
+  const harness = createHarness({
+    users: {
+      116: {
+        sources: [], hours: [9],
+        editing: { ids: [40], control: 41, prompt: [], until: now + 60000 },
+      },
+    },
+    states: {
+      116: {
+        pending: {
+          40: { source: "naval", text: "Original", caption: "Original", media: [] },
+        },
+      },
+    },
+    promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
+  });
+  await sendUpdateAt(harness, message(116, "https://x.com/user/status/40001"), now);
+
+  assert.equal(harness.github.length, 0);
+  assert.equal(harness.user(116).editing, undefined);
+  assert.match(harness.state(116).pending["1"].caption,
+    /https:\/\/x\.com\/user\/status\/40001/);
+
+  await sendUpdateAt(harness, message(116, "https://x.com/user/status/40002"), now);
+  assert.equal(harness.github.length, 1);
+  assert.match(sentTo(harness, 116).at(-1), /Fetching that thread/);
+});
+
+test("settings pause and resume preserve the rest of the user configuration", async () => {
+  const original = {
+    channel: "@news", sources: ["naval"], hours: [9, 18],
+    timezone: "Europe/Kyiv", language: "uk", style: "concise", limit: 2,
+  };
+  const harness = createHarness({ users: { 115: original } });
+  await sendUpdate(harness, message(115, "/settings"));
+
+  const settings = harness.telegram.find(({ method }) => method === "sendMessage");
+  assert.match(settings.params.text, /Digest: Active/);
+  assert.equal(settings.params.reply_markup.inline_keyboard[0][0].text,
+    "⏸ Pause digests");
+
+  await sendUpdate(harness, callback(115, "pt"));
+  assert.deepEqual(harness.user(115), { ...original, paused: true });
+  const paused = harness.telegram.findLast(({ method }) => method === "editMessageText");
+  assert.match(paused.params.text, /Digest: Paused/);
+  assert.equal(paused.params.reply_markup.inline_keyboard[0][0].text,
+    "▶️ Resume digests");
+
+  await sendUpdate(harness, callback(115, "pt"));
+  assert.deepEqual(harness.user(115), { ...original, paused: false });
 });
 
 test("paid access is labeled honestly and keeps Pro limits", async () => {
