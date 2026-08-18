@@ -93,14 +93,21 @@ function effectivePlan(user, { isAdmin = false, whitelisted = false,
 }
 
 async function resolvePlan(env, chatId, user) {
+  let plan;
   if (env.ADMIN_ID && String(chatId) === String(env.ADMIN_ID)) {
-    return effectivePlan(user, { isAdmin: true });
+    plan = effectivePlan(user, { isAdmin: true });
+  } else {
+    const [whitelisted, promotional] = await Promise.all([
+      isWhitelisted(env, chatId),
+      redis(env, "SISMEMBER", "promo", String(chatId)).then((value) => value === 1),
+    ]);
+    plan = effectivePlan(user, { whitelisted, promotional });
   }
-  const [whitelisted, promotional] = await Promise.all([
-    isWhitelisted(env, chatId),
-    redis(env, "SISMEMBER", "promo", String(chatId)).then((value) => value === 1),
-  ]);
-  return effectivePlan(user, { whitelisted, promotional });
+  if (plan.tier === "pro" && user && !user.pro_access_seen_at) {
+    user.pro_access_seen_at = new Date(Date.now()).toISOString();
+    await saveUser(env, chatId, user);
+  }
+  return plan;
 }
 
 function planPresentation(plan) {
@@ -1770,6 +1777,14 @@ async function handleCallback(cb, env) {
   const controlId = cb.message.message_id;
   const answer = (text, alert = false) =>
     tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert });
+  const editDowngrade = (user, plan) => {
+    const view = downgradeView(user, plan);
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId, text: view.text,
+      parse_mode: "HTML", reply_markup: view.reply_markup,
+      link_preview_options: { is_disabled: true },
+    });
+  };
 
   if (cb.data === NAV_SETUP) {
     await answer("");
@@ -1790,7 +1805,10 @@ async function handleCallback(cb, env) {
     return;
   }
 
-  if (cb.data.startsWith(DOWNGRADE_SOURCE)) {
+  const isDowngradeCallback = cb.data === DOWNGRADE_DONE ||
+    cb.data.startsWith(DOWNGRADE_SOURCE) || cb.data.startsWith(DOWNGRADE_HOUR);
+  let downgradeContext;
+  if (isDowngradeCallback) {
     const user = await loadUser(env, chatId);
     if (!user) return answer("That selection expired.", true);
     const plan = await resolvePlan(env, chatId, user);
@@ -1799,6 +1817,11 @@ async function handleCallback(cb, env) {
       return reply(env, chatId,
         "⭐ Pro access is active again. All retained configuration is active.");
     }
+    downgradeContext = { user, plan };
+  }
+
+  if (cb.data.startsWith(DOWNGRADE_SOURCE)) {
+    const { user, plan } = downgradeContext;
     ensureFreeSelections(user, plan);
     const index = Number(cb.data.slice(DOWNGRADE_SOURCE.length));
     const source = user.sources?.[index];
@@ -1813,23 +1836,11 @@ async function handleCallback(cb, env) {
     user.free_active_sources = [...selected];
     await saveUser(env, chatId, user);
     await answer("");
-    const view = downgradeView(user, plan);
-    return tg(env, "editMessageText", {
-      chat_id: chatId, message_id: controlId, text: view.text,
-      parse_mode: "HTML", reply_markup: view.reply_markup,
-      link_preview_options: { is_disabled: true },
-    });
+    return editDowngrade(user, plan);
   }
 
   if (cb.data.startsWith(DOWNGRADE_HOUR)) {
-    const user = await loadUser(env, chatId);
-    if (!user) return answer("That selection expired.", true);
-    const plan = await resolvePlan(env, chatId, user);
-    if (plan.tier === "pro") {
-      await answer("Pro access restored");
-      return reply(env, chatId,
-        "⭐ Pro access is active again. All retained configuration is active.");
-    }
+    const { user, plan } = downgradeContext;
     const hour = Number(cb.data.slice(DOWNGRADE_HOUR.length));
     if (!user.hours?.includes(hour)) {
       return answer("That Digest time is no longer configured.", true);
@@ -1837,23 +1848,11 @@ async function handleCallback(cb, env) {
     user.free_active_hours = [hour];
     await saveUser(env, chatId, user);
     await answer("");
-    const view = downgradeView(user, plan);
-    return tg(env, "editMessageText", {
-      chat_id: chatId, message_id: controlId, text: view.text,
-      parse_mode: "HTML", reply_markup: view.reply_markup,
-      link_preview_options: { is_disabled: true },
-    });
+    return editDowngrade(user, plan);
   }
 
   if (cb.data === DOWNGRADE_DONE) {
-    const user = await loadUser(env, chatId);
-    if (!user) return answer("That selection expired.", true);
-    const plan = await resolvePlan(env, chatId, user);
-    if (plan.tier === "pro") {
-      await answer("Pro access restored");
-      return reply(env, chatId,
-        "⭐ Pro access is active again. All retained configuration is active.");
-    }
+    const { user, plan } = downgradeContext;
     const sources = [...new Set(user.sources || [])];
     const hours = [...new Set(user.hours || [])];
     const selectedSources = [...new Set(user.free_active_sources || [])]

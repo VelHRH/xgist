@@ -110,6 +110,25 @@ class DigestHarness:
 
 
 class DigestDeliveryTest(unittest.TestCase):
+    def test_inactive_retained_digest_time_is_not_due(self):
+        config = timezone_confirmed({
+            "channel": None,
+            "sources": ["alice"],
+            "hours": [12, 18],
+            "free_active_sources": ["alice"],
+            "free_active_hours": [18],
+            "timezone": "UTC",
+        })
+        noon = datetime(2026, 8, 18, 12, tzinfo=timezone.utc)
+        evening = datetime(2026, 8, 18, 18, tzinfo=timezone.utc)
+        plan = digest.resolve_plan("1", config, [], [], "99", noon)
+        applied = digest.apply_plan(config, plan)
+
+        with patch.dict(os.environ, {"FORCE_ALL": ""}):
+            self.assertIsNone(digest._due_slot(applied, {}, noon))
+            self.assertEqual(digest._due_slot(applied, {}, evening),
+                             "2026-08-18 18")
+
     def test_free_digest_fetches_only_selected_active_accounts(self):
         now = datetime.now(timezone.utc)
         active = ["one", "three", "four", "six", "seven"]

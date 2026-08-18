@@ -140,6 +140,12 @@ function createHarness({
       const raw = values.get(`state:${id}`);
       return raw ? JSON.parse(raw) : null;
     },
+    setMember(key, value, active) {
+      const set = sets.get(key) || new Set();
+      sets.set(key, set);
+      if (active) set.add(String(value));
+      else set.delete(String(value));
+    },
   };
 }
 
@@ -838,6 +844,28 @@ test("renewed paid, trial, courtesy, and administrator Pro restore retained conf
     assert.match(settings, /Active Digest times: 07:00, 12:00, 18:00/);
     assert.doesNotMatch(settings, /Inactive Pro configuration/);
   }
+});
+
+test("webhook-observed courtesy and administrator access trigger downgrade selection", async () => {
+  const sources = ["zero", "one", "two", "three", "four", "five"];
+  const hours = [7, 18];
+  const courtesy = createHarness({
+    users: { 126: activatedUser({ sources, hours }) },
+    whitelist: [126],
+  });
+  await sendUpdate(courtesy, message(126, "/settings"));
+  assert.ok(courtesy.user(126).pro_access_seen_at);
+  courtesy.setMember("whitelist", 126, false);
+  await sendScheduledAt(courtesy, Date.now());
+  assert.ok(sentTo(courtesy, 126).some((text) => /Pro access ended/.test(text)));
+
+  const administrator = createHarness({
+    users: { 127: activatedUser({ sources, hours }) },
+  });
+  await sendUpdate(administrator, message(127, "/settings"), { ADMIN_ID: "127" });
+  assert.ok(administrator.user(127).pro_access_seen_at);
+  await sendScheduledAt(administrator, Date.now());
+  assert.ok(sentTo(administrator, 127).some((text) => /Pro access ended/.test(text)));
 });
 
 test("successful payment replaces trial identity with paid Pro", async () => {
