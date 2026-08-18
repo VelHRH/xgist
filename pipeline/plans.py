@@ -48,6 +48,18 @@ def resolve_plan(uid: str, cfg: dict, whitelist: list, promo: list,
 def apply_plan(cfg: dict, plan: dict) -> dict:
     applied = dict(cfg)
     applied["_plan"] = plan
-    applied["hours"] = (cfg.get("hours") or [9])[:plan["limits"]["hours"]]
-    applied["sources"] = (cfg.get("sources") or [])[:plan["limits"]["sources"]]
+    hours = list(dict.fromkeys(cfg.get("hours") or [9]))
+    sources = list(dict.fromkeys(cfg.get("sources") or []))
+    if plan["tier"] == "pro":
+        applied["hours"] = hours[:plan["limits"]["hours"]]
+        applied["sources"] = sources[:plan["limits"]["sources"]]
+        return applied
+    selected_hours = list(dict.fromkeys(
+        hour for hour in cfg.get("free_active_hours") or [] if hour in hours))
+    selected_sources = list(dict.fromkeys(
+        source for source in cfg.get("free_active_sources") or [] if source in sources))
+    applied["hours"] = (selected_hours if len(selected_hours) == min(
+        plan["limits"]["hours"], len(hours)) else hours)[:plan["limits"]["hours"]]
+    applied["sources"] = (selected_sources if len(selected_sources) == min(
+        plan["limits"]["sources"], len(sources)) else sources)[:plan["limits"]["sources"]]
     return applied
