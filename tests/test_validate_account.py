@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from pipeline import validate_account
+from pipeline.fetch import _auth_failure
 
 
 class FakeApi:
@@ -51,6 +52,15 @@ class ValidateAccountTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(unreadable, "unreadable")
         self.assertEqual(transient, "transient")
+
+
+class FetchFailureClassificationTest(unittest.TestCase):
+    def test_only_session_wide_403_failures_abort_all_sources(self):
+        self.assertTrue(_auth_failure(RuntimeError("no active accounts")))
+        self.assertTrue(_auth_failure(RuntimeError("403 session invalid")))
+        self.assertTrue(_auth_failure(RuntimeError("403 auth_token expired")))
+        self.assertFalse(_auth_failure(RuntimeError("403 protected account")))
+        self.assertFalse(_auth_failure(RuntimeError("403 not authorized")))
 
 
 class ValidateAccountMainTest(unittest.TestCase):

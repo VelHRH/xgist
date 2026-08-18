@@ -123,7 +123,11 @@ class SourceReadError(Exception):
 
 def _auth_failure(exc: Exception) -> bool:
     message = str(exc).lower()
-    return "no active accounts" in message or "403" in message
+    if "no active accounts" in message:
+        return True
+    return "403" in message and any(value in message for value in (
+        "session", "cookie", "login", "auth_token",
+    ))
 
 
 async def _fetch_async(handle: str) -> list[dict]:

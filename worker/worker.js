@@ -1051,6 +1051,12 @@ function accountValidationFailure(handle, outcome, replacement = null) {
   return (messages[outcome] || messages.transient) + suffix;
 }
 
+function clearAccountHealth(user, handle) {
+  if (!user.account_health) return;
+  delete user.account_health[handle];
+  if (!Object.keys(user.account_health).length) delete user.account_health;
+}
+
 async function handleAccountValidation(result, env) {
   const chatId = Number(result.chat_id);
   const handle = normalizeHandle(result.handle);
@@ -1067,10 +1073,7 @@ async function handleAccountValidation(result, env) {
         user.free_active_sources = user.free_active_sources.map((source) =>
           source === replacement ? handle : source);
       }
-      if (user.account_health) {
-        delete user.account_health[replacement];
-        if (!Object.keys(user.account_health).length) delete user.account_health;
-      }
+      clearAccountHealth(user, replacement);
       delete user.account_replacement;
       await saveUser(env, chatId, user);
       return reply(env, chatId,
@@ -1623,10 +1626,7 @@ async function handleMessage(msg, env, ctx) {
         if (u.free_active_sources) {
           u.free_active_sources = u.free_active_sources.filter((s) => s !== handle);
         }
-        if (u.account_health) {
-          delete u.account_health[handle];
-          if (!Object.keys(u.account_health).length) delete u.account_health;
-        }
+        clearAccountHealth(u, handle);
         if (u.account_replacement?.old_handle === handle) delete u.account_replacement;
       }, `🗑 Removed <code>@${esc(handle)}</code>`);
     }
