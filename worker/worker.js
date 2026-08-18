@@ -537,6 +537,11 @@ function requiredSetupStep(user) {
   return "complete";
 }
 
+function isActivated(user) {
+  if (user?.setup?.completed_at) return true;
+  return !user?.setup && !!user?.sources?.length && !!user?.timezone && !!user?.hours?.length;
+}
+
 function accountStepText(plan) {
   return "<b>Guided setup · Step 1 of 3</b>\n\n" +
     "Tell me one X account worth watching. I’ll use its strongest posts to build " +
@@ -1255,7 +1260,11 @@ async function handleMessage(msg, env, ctx) {
         user = await loadUser(env, chatId);
       }
       const requiredStep = requiredSetupStep(user);
-      if (requiredStep === "account") {
+      if (isActivated(user)) {
+        const view = homeView(user, plan, msg.from.first_name);
+        await reply(env, chatId, view.text,
+          { reply_markup: view.reply_markup });
+      } else if (requiredStep === "account") {
         const entry = user || userDefaults();
         updateSetup(entry, { currentStep: "account" });
         await saveUser(env, chatId, entry);

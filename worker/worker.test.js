@@ -322,6 +322,18 @@ test("activated start shows plan-aware configured value while unactivated start 
   await sendUpdate(unactivated, message(122, "/start"));
   assert.match(sentTo(unactivated, 122)[0], /Guided setup · Step 1 of 3/);
   assert.doesNotMatch(sentTo(unactivated, 122)[0], /Alice/);
+
+  const legacyConfig = {
+    channel: null, sources: ["naval"], hours: [8], timezone: "Europe/London",
+  };
+  const legacy = createHarness({ users: { 125: legacyConfig }, promo });
+  await sendUpdate(legacy, message(125, "/start"));
+  assert.match(sentTo(legacy, 125)[0], /Alice, your daily briefings/);
+  assert.match(sentTo(legacy, 125)[0], /08:00/);
+  assert.equal(legacy.user(125).setup, undefined);
+  assert.deepEqual(legacy.user(125).sources, legacyConfig.sources);
+  assert.deepEqual(legacy.user(125).hours, legacyConfig.hours);
+  assert.equal(legacy.user(125).timezone, legacyConfig.timezone);
 });
 
 test("setup shows saved configuration and safe edit actions without resetting it", async () => {
