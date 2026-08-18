@@ -196,8 +196,11 @@ Done. From now on it runs automatically at your configured hours.
 
 ## Bot commands
 
-See `/help` in the bot. Summary: `/channel`, `/add`, `/remove`, `/list`,
-`/times`, `/timezone`, `/limit`, `/interests`, `/style`, `/settings`.
+Use `/start` for Guided setup or the activated home, `/setup` to review and
+edit saved configuration, and `/help` for concise setup, briefing, publishing,
+Preview-editing, and plan topics. Power-user commands remain available in the
+autocomplete menu, including `/channel`, `/add`, `/remove`, `/list`, `/schedule`,
+`/timezone`, `/limit`, `/lang`, `/post_style`, and `/settings`.
 
 ## How multiple users work
 
