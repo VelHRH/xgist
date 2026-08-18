@@ -22,25 +22,6 @@
  * POST requests are the Telegram webhook.
  */
 
-const HELP = "❓ <b>Help</b>\n\nChoose a topic. Power-user commands remain available in the / menu.";
-
-const HELP_TOPICS = {
-  setup: "<b>Setup</b>\n\n/start resumes Guided setup until activation. After activation, /setup shows your saved configuration and safe edit actions.",
-  briefings: "<b>Watched accounts and briefings</b>\n\nUse /add and /remove to edit Watched accounts. Use /schedule to choose Digest times. /list shows the accounts you watch.",
-  publishing: "<b>Publishing</b>\n\nA Publishing channel is optional. Use /channel after adding me as an administrator with permission to post. Private Previews still arrive here without a channel.",
-  preview: "<b>Preview editing</b>\n\nUse ✏️ Edit to rewrite text or replace media, 🫥 Spoiler to blur content, ✅ Post to publish, ❌ Skip to discard, or 🕐 Schedule for a later Scheduled publish.",
-  plans: "<b>Free versus Pro</b>\n\n/settings shows your current plan and limits. /pro shows the Pro offer or the source and status of your active Pro access.",
-};
-
-const ADMIN_HELP = `
-
-Admin:
-/whitelist 123456789 — give a user pro limits for free (id from their /id)
-/unwhitelist 123456789 — revoke
-/whitelisted — list whitelisted ids
-/users — list all registered users
-/gen_digest_now — run your digest immediately (testing)`;
-
 // Free vs pro limits. Whitelisted users (and the admin) get pro; later,
 // paying users plug into the same check.
 const LIMITS = {
@@ -277,7 +258,6 @@ async function reply(env, chatId, text, extra = {}) {
 const MENU = {
   keyboard: [
     [{ text: "⚙️ Settings" }, { text: "📋 My accounts" }],
-    [{ text: "❓ Help" }],
   ],
   resize_keyboard: true,
   is_persistent: true,
@@ -285,26 +265,23 @@ const MENU = {
 const MENU_BUTTONS = {
   "⚙️ Settings": "/settings",
   "📋 My accounts": "/list",
-  "❓ Help": "/help",
 };
 
 // Registered in Telegram's "/" autocomplete via GET /setup-commands?key=<WEBHOOK_SECRET>
 const COMMANDS = [
   ["start", "open your home or resume setup"],
-  ["setup", "review and edit your setup"],
-  ["channel", "connect your channel: @name"],
-  ["add", "watch X accounts: @naval @pmarca"],
-  ["schedule", "digest hours: 9,18"],
-  ["lang", "post language: en | uk | ru"],
-  ["post_style", "how to write captions"],
+  ["channel", "manage your Publishing channel"],
+  ["add", "add a Watched account"],
+  ["schedule", "choose your Digest times"],
+  ["lang", "choose the post language"],
+  ["post_style", "choose how captions are written"],
   ["list", "accounts you watch"],
-  ["remove", "stop watching: @handle"],
-  ["limit", "posts per digest: 1-5"],
-  ["timezone", "e.g. Europe/Kyiv"],
-  ["settings", "your current setup"],
+  ["remove", "remove Watched accounts"],
+  ["limit", "choose posts per Digest"],
+  ["timezone", "choose your timezone"],
+  ["settings", "review and edit your settings"],
   ["pro", "upgrade to Pro ⭐"],
   ["feedback", "message the maker"],
-  ["help", "how it all works"],
 ];
 const ADMIN_COMMANDS = [
   ["gen_digest_now", "run your digest now (admin)"],
@@ -505,9 +482,17 @@ const CHANNEL_RETRY = "channel:retry";
 const CHANNEL_PUBLISH = "channel:publish";
 const CHANNEL_NOT_NOW = "channel:not-now";
 const NAV_SETUP = "nav:setup";
-const NAV_HELP = "nav:help";
 const SETUP_EDIT = "setup:edit:";
-const HELP_TOPIC = "help:topic:";
+const ACCOUNT_ADD = "account:add";
+const ACCOUNT_REMOVE_OPEN = "account:remove:open";
+const ACCOUNT_REMOVE_PICK = "account:remove:pick:";
+const ACCOUNT_REMOVE_DONE = "account:remove:done";
+const CHANNEL_CONNECT = "channel:connect";
+const CHANNEL_DISCONNECT = "channel:disconnect";
+const LANGUAGE_PICK = "language:pick:";
+const LIMIT_PICK = "limit:pick:";
+const STYLE_CUSTOM = "style:custom";
+const STYLE_DEFAULT = "style:default";
 const DOWNGRADE_SOURCE = "downgrade:source:";
 const DOWNGRADE_HOUR = "downgrade:hour:";
 const DOWNGRADE_DONE = "downgrade:done";
@@ -533,8 +518,10 @@ function setupAccountKeyboard() {
 
 function updateSetup(user, { currentStep, addingAccount } = {}) {
   const now = new Date().toISOString();
+  const completedAt = !user.setup && user.sources?.length && user.timezone && user.hours?.length
+    ? now : null;
   user.setup = {
-    started_at: now, completed_at: null, reminder_consumed: false,
+    started_at: now, completed_at: completedAt, reminder_consumed: false,
     ...user.setup,
   };
   if (user.setup.reminder_attempted_at && !user.setup.reminder_recovered_at) {
@@ -603,8 +590,8 @@ function localTimeIn(timezone) {
   }).format(new Date(Date.now()));
 }
 
-function timezoneConfirmationText(timezone) {
-  return "<b>Guided setup · Step 2 of 3</b>\n\n" +
+function timezoneConfirmationText(timezone, activated = false) {
+  return `<b>${activated ? "Timezone" : "Guided setup · Step 2 of 3"}</b>\n\n` +
     `Timezone: <code>${esc(timezone)}</code>\n` +
     `Current local time: <b>${esc(localTimeIn(timezone))}</b>\n\n` +
     "Is this correct?";
@@ -749,49 +736,14 @@ function homeView(user, plan, firstName) {
       `📢 Publishing channel: ${user.channel ? esc(String(user.channel)) : "not connected"}\n\n` +
       planPresentation(plan).label,
     reply_markup: { inline_keyboard: [[
-      { text: "⚙️ Setup", callback_data: NAV_SETUP },
-      { text: "❓ Help", callback_data: NAV_HELP },
+      { text: "⚙️ Settings", callback_data: NAV_SETUP },
     ]] },
-  };
-}
-
-function helpView(isAdmin = false) {
-  return {
-    text: HELP + (isAdmin ? ADMIN_HELP : ""),
-    reply_markup: { inline_keyboard: [
-      [{ text: "Setup", callback_data: `${HELP_TOPIC}setup` }],
-      [{ text: "Accounts and briefings", callback_data: `${HELP_TOPIC}briefings` }],
-      [{ text: "Publishing", callback_data: `${HELP_TOPIC}publishing` }],
-      [{ text: "Preview editing", callback_data: `${HELP_TOPIC}preview` }],
-      [{ text: "Free versus Pro", callback_data: `${HELP_TOPIC}plans` }],
-    ] },
-  };
-}
-
-async function setupView(env, chatId) {
-  const user = (await loadUser(env, chatId)) || userDefaults();
-  const plan = await resolvePlan(env, chatId, user);
-  return {
-    text: "⚙️ <b>Current setup</b>\n\n" +
-      configurationLines(user, plan).join("\n") + "\n" +
-      `🌍 Timezone: ${user.timezone ? esc(user.timezone) : "not set"}\n` +
-      `📢 Publishing channel: ${user.channel ? esc(String(user.channel)) : "not connected"}\n\n` +
-      `${planPresentation(plan).label}\nMaximum: ${planCapacity(plan)}`,
-    reply_markup: { inline_keyboard: [
-      [
-        { text: "Edit accounts", callback_data: `${SETUP_EDIT}accounts` },
-        { text: "Edit timezone", callback_data: `${SETUP_EDIT}timezone` },
-      ],
-      [
-        { text: "Edit Digest times", callback_data: `${SETUP_EDIT}times` },
-        { text: "Edit channel", callback_data: `${SETUP_EDIT}channel` },
-      ],
-    ] },
   };
 }
 
 function digestTimeView(user, plan) {
   const selected = new Set(selectedDigestTimes(user));
+  const timezone = canonicalTimezone(user.timezone) || DEFAULT_TZ;
   const keyboard = [];
   for (let start = 0; start < 24; start += 4) {
     keyboard.push(Array.from({ length: 4 }, (_, index) => {
@@ -802,15 +754,13 @@ function digestTimeView(user, plan) {
       };
     }));
   }
-  if (plan.tier === "pro") {
-    keyboard.push([{ text: "Done", callback_data: DIGEST_TIME_DONE }]);
-  }
+  keyboard.push([{ text: "Done", callback_data: DIGEST_TIME_DONE }]);
   const entitlement = plan.tier === "pro"
     ? `Your Pro plan includes up to ${plan.limits.hours} active daily Digest times.`
     : "Your Free plan includes exactly one active daily Digest time.";
   return {
-    text: "<b>Guided setup · Step 3 of 3</b>\n\n" +
-      `Choose in <code>${esc(user.timezone)}</code>. ${entitlement}\n` +
+    text: `<b>${isActivated(user) ? "Digest schedule" : "Guided setup · Step 3 of 3"}</b>\n\n` +
+      `Choose in <code>${esc(timezone)}</code>. ${entitlement}\n` +
       "Delivery normally begins within a few minutes after the selected hour.",
     reply_markup: { inline_keyboard: keyboard },
   };
@@ -896,13 +846,13 @@ async function activateWithDigestTimes(env, chatId, hours, from) {
 
 async function showTimezoneStep(env, chatId, user, intro = "") {
   updateSetup(user, { currentStep: "timezone" });
-  if (!user.setup.timezone_candidate && user.timezone) {
-    user.setup.timezone_candidate = canonicalTimezone(user.timezone);
+  if (!user.setup.timezone_candidate) {
+    user.setup.timezone_candidate = canonicalTimezone(user.timezone) || DEFAULT_TZ;
   }
   await saveUser(env, chatId, user);
   if (user.setup.timezone_candidate) {
     return reply(env, chatId,
-      intro + timezoneConfirmationText(user.setup.timezone_candidate),
+      intro + timezoneConfirmationText(user.setup.timezone_candidate, isActivated(user)),
       { reply_markup: timezoneConfirmationKeyboard() });
   }
   return reply(env, chatId,
@@ -913,6 +863,10 @@ async function showTimezoneStep(env, chatId, user, intro = "") {
 
 async function showDigestTimeStep(env, chatId, user, intro = "") {
   updateSetup(user, { currentStep: "digest_time" });
+  if (isActivated(user) && !Array.isArray(user.setup.digest_time_choices)) {
+    user.setup.digest_time_choices = [...configurationAccess(
+      user, await resolvePlan(env, chatId, user)).activeHours];
+  }
   await saveUser(env, chatId, user);
   const plan = await resolvePlan(env, chatId, user);
   const view = digestTimeView(user, plan);
@@ -930,11 +884,14 @@ async function beginTimezoneResolution(env, chatId, input) {
   delete user.setup.timezone_candidate;
   delete user.setup.timezone_choices;
   if (!choices.length) {
-    user.setup.choosing_timezone = true;
+    const fallback = canonicalTimezone(user.timezone) || DEFAULT_TZ;
+    user.setup.choosing_timezone = false;
+    user.setup.timezone_candidate = fallback;
     await saveUser(env, chatId, user);
     return reply(env, chatId,
-      "I couldn’t resolve that timezone. Try a city such as Kyiv or a valid " +
-      "IANA timezone such as Europe/Kyiv.");
+      `I couldn’t identify “${esc(input)}”, so your timezone remains ` +
+      `<code>${esc(fallback)}</code>. You can confirm it or choose another city.`,
+      { reply_markup: timezoneConfirmationKeyboard() });
   }
   if (choices.length > 1) {
     user.setup.choosing_timezone = true;
@@ -949,7 +906,7 @@ async function beginTimezoneResolution(env, chatId, input) {
   user.setup.choosing_timezone = false;
   user.setup.timezone_candidate = choices[0].zone;
   await saveUser(env, chatId, user);
-  return reply(env, chatId, timezoneConfirmationText(choices[0].zone),
+  return reply(env, chatId, timezoneConfirmationText(choices[0].zone, isActivated(user)),
     { reply_markup: timezoneConfirmationKeyboard() });
 }
 
@@ -980,7 +937,7 @@ async function confirmTimezone(env, chatId) {
   if (user.setup.current_step === "account") {
     return reply(env, chatId,
       `✅ Timezone confirmed: <code>${esc(timezone)}</code>.\n\n` +
-      "Continue Guided setup by adding a Watched account with /add @handle.");
+      "Continue Guided setup with /add, then send the X account when prompted.");
   }
   return showDigestTimeStep(env, chatId, user,
     `✅ Timezone confirmed: <code>${esc(timezone)}</code>.\n\n`);
@@ -997,15 +954,18 @@ async function beginAccountValidation(env, chatId, input) {
     return reply(env, chatId,
       "That doesn’t look like an X profile. Send one @handle, bare handle, or profile URL.");
   }
+  delete user.settings_input;
   const plan = await resolvePlan(env, chatId, user);
   const current = user.sources || [];
   const replace = current.includes(user.account_replacement?.old_handle)
     ? user.account_replacement.old_handle : null;
   if (user.account_validation?.handle === handle) {
+    await saveUser(env, chatId, user);
     return reply(env, chatId,
       `I’m already checking ${xlink(handle)}. I’ll message you when it’s verified.`);
   }
   if (current.includes(handle)) {
+    await saveUser(env, chatId, user);
     if (replace) {
       return reply(env, chatId,
         `${xlink(handle)} is already in your Watched accounts. ` +
@@ -1017,6 +977,7 @@ async function beginAccountValidation(env, chatId, input) {
       { reply_markup: setupAccountKeyboard() });
   }
   if (!replace && current.length >= plan.limits.sources) {
+    await saveUser(env, chatId, user);
     return reply(env, chatId,
       `Your ${plan.tier === "pro" ? "Pro" : "Free"} plan includes ` +
       `${plan.limits.sources} watched accounts. Remove one first` +
@@ -1328,6 +1289,7 @@ async function verifyPublishingChannel(env, chatId, candidate) {
   user.channel_verified = {
     id: candidate.id, at: new Date(Date.now()).toISOString(),
   };
+  delete user.settings_input;
   delete user.channel_candidate;
   if (user.setup) {
     user.setup.reminder_consumed = true;
@@ -1348,6 +1310,120 @@ async function verifyPublishingChannel(env, chatId, candidate) {
   return reply(env, chatId, `✅ Publishing channel verified: ${label}.`);
 }
 
+async function accountSettingsView(env, chatId) {
+  const user = (await loadUser(env, chatId)) || userDefaults();
+  const plan = await resolvePlan(env, chatId, user);
+  const sources = user.sources || [];
+  const keyboard = [[{ text: "➕ Add account", callback_data: ACCOUNT_ADD }]];
+  if (sources.length) {
+    keyboard.push([{ text: "🗑 Remove accounts", callback_data: ACCOUNT_REMOVE_OPEN }]);
+  }
+  return {
+    text: "👀 <b>Watched accounts</b>\n\n" +
+      (sources.length ? sources.map(xlink).join("\n") : "No accounts added yet.") +
+      `\n\n${sources.length}/${plan.limits.sources} accounts used.`,
+    reply_markup: { inline_keyboard: keyboard },
+  };
+}
+
+function accountRemovalView(user) {
+  const sources = user.sources || [];
+  const selected = new Set(user.account_removal_choices || []);
+  const keyboard = [];
+  for (let index = 0; index < sources.length; index += 2) {
+    keyboard.push(sources.slice(index, index + 2).map((source, offset) => ({
+      text: `${selected.has(source) ? "✓ " : ""}@${source}`,
+      callback_data: `${ACCOUNT_REMOVE_PICK}${index + offset}`,
+    })));
+  }
+  keyboard.push([{ text: "Done", callback_data: ACCOUNT_REMOVE_DONE }]);
+  return {
+    text: "🗑 <b>Remove Watched accounts</b>\n\n" +
+      "Select every account you want to remove, then tap Done.\n" +
+      `Selected: ${selected.size}`,
+    reply_markup: { inline_keyboard: keyboard },
+  };
+}
+
+async function promptAccountInput(env, chatId) {
+  const user = (await loadUser(env, chatId)) || userDefaults();
+  user.settings_input = "account";
+  await saveUser(env, chatId, user);
+  return reply(env, chatId,
+    "Send the X account you want to watch: an @handle, bare handle, or X profile URL.");
+}
+
+function channelSettingsView(user) {
+  const keyboard = [[{
+    text: user.channel ? "Replace channel" : "Connect channel",
+    callback_data: CHANNEL_CONNECT,
+  }]];
+  if (user.channel) {
+    keyboard.push([{ text: "Disconnect channel", callback_data: CHANNEL_DISCONNECT }]);
+  }
+  return {
+    text: "📢 <b>Publishing channel</b>\n\n" +
+      `Current: ${user.channel ? esc(String(user.channel)) : "not connected"}\n\n` +
+      "Private Previews still arrive here without a Publishing channel.",
+    reply_markup: { inline_keyboard: keyboard },
+  };
+}
+
+async function showChannelSettings(env, chatId) {
+  const user = (await loadUser(env, chatId)) || userDefaults();
+  const view = channelSettingsView(user);
+  return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
+}
+
+async function promptChannelInput(env, chatId) {
+  const user = (await loadUser(env, chatId)) || userDefaults();
+  user.settings_input = "channel";
+  await saveUser(env, chatId, user);
+  return reply(env, chatId,
+    "Add me to the Publishing channel as an administrator with Post Messages enabled. " +
+    "Then send its @username or forward me a message from a private channel.");
+}
+
+function languageSettingsView(user) {
+  const languages = [["en", "English"], ["uk", "Ukrainian"], ["ru", "Russian"]];
+  const current = user.language || "en";
+  return {
+    text: "🌐 <b>Post language</b>\n\nChoose the language used for generated posts.",
+    reply_markup: { inline_keyboard: [languages.map(([code, label]) => ({
+      text: `${current === code ? "✓ " : ""}${label}`,
+      callback_data: `${LANGUAGE_PICK}${code}`,
+    }))] },
+  };
+}
+
+function limitSettingsView(user) {
+  const current = user.limit || 3;
+  return {
+    text: "🔢 <b>Posts per Digest</b>\n\nChoose the maximum number of posts in each Digest.",
+    reply_markup: { inline_keyboard: [[1, 2, 3, 4, 5].map((limit) => ({
+      text: `${current === limit ? "✓ " : ""}${limit}`,
+      callback_data: `${LIMIT_PICK}${limit}`,
+    }))] },
+  };
+}
+
+function styleSettingsView(user) {
+  return {
+    text: "✍️ <b>Caption style</b>\n\n" +
+      `Current: ${user.style ? esc(user.style) : "default"}`,
+    reply_markup: { inline_keyboard: [
+      [{ text: "Set custom style", callback_data: STYLE_CUSTOM }],
+      [{ text: "Use default", callback_data: STYLE_DEFAULT }],
+    ] },
+  };
+}
+
+async function showStyleSettings(env, chatId) {
+  const user = (await loadUser(env, chatId)) || userDefaults();
+  const view = styleSettingsView(user);
+  return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
+}
+
 /** The /settings body + its inline pause/resume toggle. Shared between the
  *  /settings command and the toggle callback so both render identically and
  *  the callback can edit the message in place. */
@@ -1358,23 +1434,40 @@ async function settingsView(env, chatId) {
   const langNames = { en: "English", uk: "Ukrainian", ru: "Russian" };
   const paused = !!u.paused;
   const lines = [
-    "⚙️ <b>Your setup</b>",
+    "⚙️ <b>Settings</b>",
     "",
-    `📢 Publishing channel: ${u.channel ? esc(String(u.channel)) : "not set — /channel @yourchannel"}`,
+    `📢 Publishing channel: ${u.channel ? esc(String(u.channel)) : "not connected"}`,
     ...configurationLines(u, plan),
     `🌍 Timezone: ${u.timezone ? esc(u.timezone) : "Europe/Kyiv (default)"}`,
     `🌐 Language: ${langNames[u.language || "en"]}`,
     `✍️ Style: ${u.style ? esc(u.style) : "default"}`,
-    `🔢 Posts per digest: ${u.limit}`,
+    `🔢 Posts per digest: ${u.limit || 3}`,
     `${presentation.label}\n${presentation.details}\nMaximum: ${planCapacity(plan)}`,
     paused ? "⏸ Digest: Paused" : "▶️ Digest: Active",
   ];
   return {
     text: lines.join("\n"),
-    reply_markup: { inline_keyboard: [[
-      { text: paused ? "▶️ Resume digests" : "⏸ Pause digests",
-        callback_data: "pt" },
-    ]] },
+    reply_markup: { inline_keyboard: [
+      [
+        { text: "Accounts", callback_data: `${SETUP_EDIT}accounts` },
+        { text: "Digest schedule", callback_data: `${SETUP_EDIT}times` },
+      ],
+      [
+        { text: "Timezone", callback_data: `${SETUP_EDIT}timezone` },
+        { text: "Publishing channel", callback_data: `${SETUP_EDIT}channel` },
+      ],
+      [
+        { text: "Language", callback_data: `${SETUP_EDIT}language` },
+        { text: "Caption style", callback_data: `${SETUP_EDIT}style` },
+      ],
+      [
+        { text: "Posts per Digest", callback_data: `${SETUP_EDIT}limit` },
+      ],
+      [
+        { text: paused ? "▶️ Resume digests" : "⏸ Pause digests",
+          callback_data: "pt" },
+      ],
+    ] },
   };
 }
 
@@ -1488,6 +1581,31 @@ async function handleMessage(msg, env, ctx) {
     }
   }
 
+  if (!commandish && msg.text) {
+    const user = await loadUser(env, chatId);
+    if (user?.settings_input === "channel") {
+      const input = msg.text.trim();
+      if (!/^@[a-zA-Z0-9_]{4,}$/.test(input) && !/^-100\d+$/.test(input)) {
+        return reply(env, chatId,
+          "I couldn’t identify that channel. Send its @username or forward a message " +
+          "from the channel. Your existing channel is unchanged.");
+      }
+      const value = input.startsWith("@") ? input : Number(input);
+      return verifyPublishingChannel(env, chatId, { id: value, title: input });
+    }
+    if (user?.settings_input === "style") {
+      const style = msg.text.trim();
+      user.style = style || null;
+      delete user.settings_input;
+      await saveUser(env, chatId, user);
+      return reply(env, chatId,
+        style ? `✅ Caption style saved: ${esc(style)}` : "✅ Default caption style restored.");
+    }
+    if (user?.settings_input === "account") {
+      return beginAccountValidation(env, chatId, msg.text);
+    }
+  }
+
   // Paste-a-link → thread post. Deliberately after the ✏️-edit capture above
   // (a link pasted mid-Edit is edit content, not a new thread) and before the
   // command switch. Skipped for commands so "/foo …x.com/…/status/…" isn't
@@ -1560,15 +1678,9 @@ async function handleMessage(msg, env, ctx) {
       return;
     }
 
-    case "/help": {
-      const view = helpView(isAdmin);
-      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
-    }
-
-    case "/setup": {
-      const view = await setupView(env, chatId);
-      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
-    }
+    case "/setup":
+    case "/help":
+      return;
 
     case "/feedback": {
       if (!arg) {
@@ -1606,92 +1718,62 @@ async function handleMessage(msg, env, ctx) {
     }
 
     case "/channel": {
-      if (!/^@[a-zA-Z0-9_]{4,}$/.test(arg) && !/^-100\d+$/.test(arg)) {
-        return reply(env, chatId,
-          "Usage: /channel @yourchannel\n(or forward me a message from a private channel)");
-      }
-      const value = arg.startsWith("@") ? arg : Number(arg);
-      return verifyPublishingChannel(env, chatId, { id: value, title: arg });
+      return showChannelSettings(env, chatId);
     }
 
     case "/add": {
-      if (!arg) return reply(env, chatId, "Usage: /add @naval");
-      return beginAccountValidation(env, chatId, arg);
+      return promptAccountInput(env, chatId);
     }
 
     case "/remove": {
-      const handle = arg.replace(/^@/, "").toLowerCase();
-      return setField(env, chatId, (u) => {
-        u.sources = u.sources.filter((s) => s !== handle);
-        if (u.free_active_sources) {
-          u.free_active_sources = u.free_active_sources.filter((s) => s !== handle);
-        }
-        clearAccountHealth(u, handle);
-        if (u.account_replacement?.old_handle === handle) delete u.account_replacement;
-      }, `🗑 Removed <code>@${esc(handle)}</code>`);
+      const user = (await loadUser(env, chatId)) || userDefaults();
+      if (!user.sources?.length) {
+        const view = await accountSettingsView(env, chatId);
+        return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
+      }
+      user.account_removal_choices = [];
+      await saveUser(env, chatId, user);
+      const view = accountRemovalView(user);
+      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
     }
 
     case "/list": {
-      const u = await loadUser(env, chatId);
-      if (!u?.sources?.length) {
-        return reply(env, chatId, "You're not watching anyone yet — try /add @naval");
-      }
-      const plan = await resolvePlan(env, chatId, u);
-      return reply(env, chatId, configurationLines(u, plan).join("\n"));
+      const view = await accountSettingsView(env, chatId);
+      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
     }
 
     case "/times":
     case "/schedule": {
-      const hours = [...new Set(arg.split(/[,\s]+/).map(Number)
-        .filter((h) => Number.isInteger(h) && h >= 0 && h <= 23))].sort((a, b) => a - b);
-      if (!hours.length) {
-        return reply(env, chatId,
-          "Usage: /schedule 9,18 — the hours (0-23) when you want your digest, in your timezone");
-      }
-      const u0 = await loadUser(env, chatId);
-      const max = (await limitsFor(env, chatId, u0)).hours;
-      if (hours.length > max) {
-        return reply(env, chatId,
-          `Your plan includes up to ${max} digest time(s) per day. ` +
-          `Pro gives you ${LIMITS.pro.hours} — /pro`);
-      }
-      return activateWithDigestTimes(env, chatId, hours, msg.from);
+      const user = (await loadUser(env, chatId)) || userDefaults();
+      return showDigestTimeStep(env, chatId, user);
     }
 
     case "/timezone": {
-      if (!arg) {
-        return reply(env, chatId,
-          "Usage: /timezone Kyiv or /timezone Europe/Kyiv");
-      }
-      return beginTimezoneResolution(env, chatId, arg);
+      const user = (await loadUser(env, chatId)) || userDefaults();
+      return showTimezoneStep(env, chatId, user);
     }
 
     case "/limit": {
-      const n = Number(arg);
-      if (!Number.isInteger(n) || n < 1 || n > 5) return reply(env, chatId, "Usage: /limit 3 (1-5)");
-      return setField(env, chatId, (u) => { u.limit = n; }, `Up to ${n} posts per digest.`);
+      const user = (await loadUser(env, chatId)) || userDefaults();
+      const view = limitSettingsView(user);
+      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
     }
 
     case "/lang":
     case "/language": {
-      const lang = arg.toLowerCase();
-      if (!["en", "uk", "ru"].includes(lang)) {
-        return reply(env, chatId, "Usage: /lang en | uk | ru");
-      }
-      const names = { en: "English", uk: "Ukrainian", ru: "Russian" };
-      return setField(env, chatId, (u) => { u.language = lang; },
-        `🌐 Posts will be written in ${names[lang]}.`);
+      const user = (await loadUser(env, chatId)) || userDefaults();
+      const view = languageSettingsView(user);
+      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
     }
 
-    // Hidden power-user command (not in /help): steers what "interesting" means.
+    // Hidden power-user command: steers what "interesting" means.
     case "/interests":
       return setField(env, chatId, (u) => { u.interests = arg || null; },
         arg ? "Interests saved." : "Interests cleared.");
 
     case "/style":
     case "/post_style":
-      return setField(env, chatId, (u) => { u.style = arg || null; },
-        arg ? "✍️ Caption style saved." : "✍️ Caption style reset to default.");
+      return showStyleSettings(env, chatId);
 
     case "/settings": {
       const view = await settingsView(env, chatId);
@@ -1700,7 +1782,7 @@ async function handleMessage(msg, env, ctx) {
 
     case "/whitelist":
     case "/unwhitelist": {
-      if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
+      if (!isAdmin) return reply(env, chatId, "Unknown command. Use /settings.");
       if (!/^\d+$/.test(arg)) {
         return reply(env, chatId,
           `Usage: ${cmd} 123456789\n(the user can get their numeric id with /id)`);
@@ -1718,13 +1800,13 @@ async function handleMessage(msg, env, ctx) {
     }
 
     case "/whitelisted": {
-      if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
+      if (!isAdmin) return reply(env, chatId, "Unknown command. Use /settings.");
       const list = ((await redis(env, "SMEMBERS", "whitelist")) || []).sort();
       return reply(env, chatId, list.length ? list.join("\n") : "Whitelist is empty.");
     }
 
     case "/gen_digest_now": {
-      if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
+      if (!isAdmin) return reply(env, chatId, "Unknown command. Use /settings.");
       const resp = await dispatchDigest(env, { only_user: String(chatId) });
       if (resp.status !== 204) {
         const detail = await resp.text();
@@ -1738,7 +1820,7 @@ async function handleMessage(msg, env, ctx) {
     }
 
     case "/users": {
-      if (!isAdmin) return reply(env, chatId, "Unknown command. /help");
+      if (!isAdmin) return reply(env, chatId, "Unknown command. Use /settings.");
       const ids = ((await redis(env, "SMEMBERS", "uids")) || []).sort();
       if (!ids.length) return reply(env, chatId, "No users yet.");
       const raws = await redis(env, "MGET", ...ids.map((id) => `user:${id}`));
@@ -1761,7 +1843,7 @@ async function handleMessage(msg, env, ctx) {
     }
 
     default:
-      return reply(env, chatId, "Unknown command. /help");
+      return reply(env, chatId, "Unknown command. Use /settings.");
   }
 }
 
@@ -1841,21 +1923,8 @@ async function handleCallback(cb, env) {
 
   if (cb.data === NAV_SETUP) {
     await answer("");
-    const view = await setupView(env, chatId);
+    const view = await settingsView(env, chatId);
     return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
-  }
-
-  if (cb.data === NAV_HELP) {
-    await answer("");
-    const view = helpView(isAdminUser(cb.from, env));
-    return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
-  }
-
-  if (cb.data.startsWith(HELP_TOPIC)) {
-    await answer("");
-    const topic = HELP_TOPICS[cb.data.slice(HELP_TOPIC.length)];
-    if (topic) return reply(env, chatId, topic);
-    return;
   }
 
   const isDowngradeCallback = cb.data === DOWNGRADE_DONE ||
@@ -1975,15 +2044,172 @@ async function handleCallback(cb, env) {
 
   if (cb.data.startsWith(SETUP_EDIT)) {
     await answer("");
-    const prompts = {
-      accounts: "Use /add @handle to add a Watched account, /remove @handle to remove one, or /list to review them.",
-      timezone: "Use /timezone Kyiv or /timezone Europe/Kyiv. Your Digest times stay at the same local wall-clock hours.",
-      times: "Use /schedule 9,18 to edit your Digest times. Your other setup stays unchanged.",
-      channel: "Use /channel @yourchannel to connect or replace your optional Publishing channel.",
-    };
-    const prompt = prompts[cb.data.slice(SETUP_EDIT.length)];
-    if (prompt) return reply(env, chatId, prompt);
+    const action = cb.data.slice(SETUP_EDIT.length);
+    if (action === "accounts") {
+      const view = await accountSettingsView(env, chatId);
+      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
+    }
+    if (action === "timezone") {
+      const user = (await loadUser(env, chatId)) || userDefaults();
+      return showTimezoneStep(env, chatId, user);
+    }
+    if (action === "times") {
+      const user = (await loadUser(env, chatId)) || userDefaults();
+      return showDigestTimeStep(env, chatId, user);
+    }
+    if (action === "channel") return showChannelSettings(env, chatId);
+    if (action === "language") {
+      const user = (await loadUser(env, chatId)) || userDefaults();
+      const view = languageSettingsView(user);
+      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
+    }
+    if (action === "style") return showStyleSettings(env, chatId);
+    if (action === "limit") {
+      const user = (await loadUser(env, chatId)) || userDefaults();
+      const view = limitSettingsView(user);
+      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
+    }
     return;
+  }
+
+  if (cb.data === ACCOUNT_ADD) {
+    await answer("");
+    return promptAccountInput(env, chatId);
+  }
+
+  if (cb.data === ACCOUNT_REMOVE_OPEN) {
+    await answer("");
+    const user = (await loadUser(env, chatId)) || userDefaults();
+    if (!user.sources?.length) {
+      const view = await accountSettingsView(env, chatId);
+      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
+    }
+    user.account_removal_choices = [];
+    await saveUser(env, chatId, user);
+    const view = accountRemovalView(user);
+    return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
+  }
+
+  if (cb.data.startsWith(ACCOUNT_REMOVE_PICK)) {
+    await answer("");
+    const user = await loadUser(env, chatId);
+    const index = Number(cb.data.slice(ACCOUNT_REMOVE_PICK.length));
+    const source = user?.sources?.[index];
+    if (!source) return;
+    const selected = new Set(user.account_removal_choices || []);
+    if (selected.has(source)) selected.delete(source);
+    else selected.add(source);
+    user.account_removal_choices = [...selected];
+    await saveUser(env, chatId, user);
+    const view = accountRemovalView(user);
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId, text: view.text,
+      parse_mode: "HTML", reply_markup: view.reply_markup,
+      link_preview_options: { is_disabled: true },
+    });
+  }
+
+  if (cb.data === ACCOUNT_REMOVE_DONE) {
+    await answer("");
+    const user = await loadUser(env, chatId);
+    if (!user) return;
+    const selected = new Set(user.account_removal_choices || []);
+    user.sources = (user.sources || []).filter((source) => !selected.has(source));
+    if (user.free_active_sources) {
+      user.free_active_sources = user.free_active_sources.filter(
+        (source) => !selected.has(source));
+    }
+    for (const source of selected) clearAccountHealth(user, source);
+    if (selected.has(user.account_replacement?.old_handle)) delete user.account_replacement;
+    delete user.account_removal_choices;
+    await saveUser(env, chatId, user);
+    const view = await accountSettingsView(env, chatId);
+    const result = selected.size
+      ? `✅ Removed ${selected.size} Watched account${selected.size === 1 ? "" : "s"}.\n\n`
+      : "Nothing was removed.\n\n";
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId, text: result + view.text,
+      parse_mode: "HTML", reply_markup: view.reply_markup,
+      link_preview_options: { is_disabled: true },
+    });
+  }
+
+  if (cb.data === CHANNEL_CONNECT) {
+    await answer("");
+    return promptChannelInput(env, chatId);
+  }
+
+  if (cb.data === CHANNEL_DISCONNECT) {
+    await answer("");
+    const user = (await loadUser(env, chatId)) || userDefaults();
+    user.channel = null;
+    delete user.channel_verified;
+    delete user.channel_candidate;
+    delete user.settings_input;
+    await saveUser(env, chatId, user);
+    const view = channelSettingsView(user);
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId,
+      text: "✅ Publishing channel disconnected.\n\n" + view.text,
+      parse_mode: "HTML", reply_markup: view.reply_markup,
+      link_preview_options: { is_disabled: true },
+    });
+  }
+
+  if (cb.data.startsWith(LANGUAGE_PICK)) {
+    await answer("");
+    const language = cb.data.slice(LANGUAGE_PICK.length);
+    if (!["en", "uk", "ru"].includes(language)) return;
+    const user = (await loadUser(env, chatId)) || userDefaults();
+    user.language = language;
+    await saveUser(env, chatId, user);
+    const view = languageSettingsView(user);
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId,
+      text: "✅ Post language updated.\n\n" + view.text,
+      parse_mode: "HTML", reply_markup: view.reply_markup,
+      link_preview_options: { is_disabled: true },
+    });
+  }
+
+  if (cb.data.startsWith(LIMIT_PICK)) {
+    await answer("");
+    const limit = Number(cb.data.slice(LIMIT_PICK.length));
+    if (!Number.isInteger(limit) || limit < 1 || limit > 5) return;
+    const user = (await loadUser(env, chatId)) || userDefaults();
+    user.limit = limit;
+    await saveUser(env, chatId, user);
+    const view = limitSettingsView(user);
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId,
+      text: `✅ Up to ${limit} posts will appear in each Digest.\n\n` + view.text,
+      parse_mode: "HTML", reply_markup: view.reply_markup,
+      link_preview_options: { is_disabled: true },
+    });
+  }
+
+  if (cb.data === STYLE_CUSTOM) {
+    await answer("");
+    const user = (await loadUser(env, chatId)) || userDefaults();
+    user.settings_input = "style";
+    await saveUser(env, chatId, user);
+    return reply(env, chatId,
+      "Describe how captions should be written. Your next message will become the custom style.");
+  }
+
+  if (cb.data === STYLE_DEFAULT) {
+    await answer("");
+    const user = (await loadUser(env, chatId)) || userDefaults();
+    user.style = null;
+    delete user.settings_input;
+    await saveUser(env, chatId, user);
+    const view = styleSettingsView(user);
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId,
+      text: "✅ Default caption style restored.\n\n" + view.text,
+      parse_mode: "HTML", reply_markup: view.reply_markup,
+      link_preview_options: { is_disabled: true },
+    });
   }
 
   if (cb.data === SETUP_ADD_ACCOUNT) {
@@ -2015,7 +2241,7 @@ async function handleCallback(cb, env) {
     delete user.setup.timezone_choices;
     updateSetup(user, { currentStep: "timezone" });
     await saveUser(env, chatId, user);
-    return reply(env, chatId, timezoneConfirmationText(choice.zone),
+    return reply(env, chatId, timezoneConfirmationText(choice.zone, isActivated(user)),
       { reply_markup: timezoneConfirmationKeyboard() });
   }
 
@@ -2042,15 +2268,11 @@ async function handleCallback(cb, env) {
     const user = await loadUser(env, chatId);
     if (!user || !Number.isInteger(hour) || hour < 0 || hour > 23) return;
     const plan = await resolvePlan(env, chatId, user);
-    if (plan.tier === "free") {
-      await tg(env, "editMessageReplyMarkup", {
-        chat_id: chatId, message_id: controlId,
-        reply_markup: { inline_keyboard: [] },
-      });
-      return activateWithDigestTimes(env, chatId, [hour], cb.from);
-    }
     const selected = new Set(selectedDigestTimes(user));
-    if (selected.has(hour)) selected.delete(hour);
+    if (plan.tier === "free") {
+      selected.clear();
+      selected.add(hour);
+    } else if (selected.has(hour)) selected.delete(hour);
     else if (selected.size < plan.limits.hours) selected.add(hour);
     else {
       return reply(env, chatId,
@@ -2089,9 +2311,7 @@ async function handleCallback(cb, env) {
       user.setup.channel_choice = "connect";
       await saveUser(env, chatId, user);
     }
-    return reply(env, chatId,
-      "Add me to your Publishing channel as an admin, then send " +
-      "/channel @yourchannel. For a private channel, forward me a message from it.");
+    return promptChannelInput(env, chatId);
   }
 
   if (cb.data === SETUP_SKIP_CHANNEL) {
@@ -2105,7 +2325,7 @@ async function handleCallback(cb, env) {
     }
     return reply(env, chatId,
       "✅ Setup complete. Private Previews will arrive here; connect a Publishing " +
-      "channel later with /channel whenever you want.");
+      "channel later from Settings or with /channel.");
   }
 
   if (cb.data === CHANNEL_RETRY) {
@@ -2113,7 +2333,7 @@ async function handleCallback(cb, env) {
     const candidate = (await loadUser(env, chatId))?.channel_candidate;
     if (!candidate) {
       return reply(env, chatId,
-        "That channel setup expired. Send /channel @yourchannel or forward a private-channel message.");
+        "That channel setup expired. Open /channel and try again.");
     }
     return verifyPublishingChannel(env, chatId, candidate);
   }
@@ -2302,7 +2522,7 @@ async function handleCallback(cb, env) {
     const [head, idsStr] = cb.data.split(":");
     const hour = Number(head.slice(2));
     const user = await loadUser(env, chatId);
-    if (!user?.channel) return answer("Set your channel first: /channel @name", true);
+    if (!user?.channel) return answer("Open /channel and connect a channel first.", true);
     const tz = user.timezone || DEFAULT_TZ;
     try {
       await redis(env, "HSET", "sched", `${chatId}:${controlId}`, JSON.stringify({
@@ -2367,8 +2587,8 @@ async function handleCallback(cb, env) {
       }
       return reply(env, chatId,
         "This exact Preview is saved. Add me to your Publishing channel as an " +
-        "administrator with <b>Post Messages</b> enabled, then send " +
-        "/channel @yourchannel. For a private channel, forward me a message from it.");
+        "administrator with <b>Post Messages</b> enabled, then open /channel and " +
+        "follow the prompt. For a private channel, forward me a message from it.");
     }
 
     await answer("");
@@ -2730,8 +2950,8 @@ function landingHTML(origin, botUser) {
 
   <h2>How it works</h2>
   <ol class="steps">
-    <li>Tell the bot which X accounts to watch: <code>/add naval pmarca</code></li>
-    <li>Set your digest hours: <code>/schedule 9,18</code></li>
+    <li>Open <code>/add</code>, then send each X account when prompted</li>
+    <li>Open <code>/schedule</code> and choose your Digest times</li>
     <li>Add the bot as admin of your channel</li>
     <li>Get digests, tap ✅ — the post is in your channel in a second</li>
   </ol>

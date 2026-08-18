@@ -10,7 +10,7 @@ Canonical vocabulary for XGist. Definitions only — no implementation detail.
 
 - **Publishing channel** — the optional Telegram channel to which approved Previews are published. A user can receive Digests without one and is prompted to connect one when they first attempt to publish.
 
-- **Guided setup** — the resumable onboarding flow for users who are not yet activated. It collects Watched accounts one at a time, confirms the user's timezone, and then asks the user to confirm a Digest time. After activation it offers, but does not require, a Publishing channel. Once activated, `/start` shows the user's current status instead; `/setup` explicitly opens the flow again.
+- **Guided setup** — the resumable onboarding flow for users who are not yet activated. It collects Watched accounts one at a time, confirms the user's timezone, and then asks the user to confirm a Digest time. After activation it offers, but does not require, a Publishing channel. Once activated, `/start` shows the user's current status and `/settings` manages the saved configuration.
 
 - **Setup reminder** — the single proactive message sent roughly 24 hours after a user abandons Guided setup while still unactivated. It resumes the exact unfinished step; no further setup reminders are sent.
 
