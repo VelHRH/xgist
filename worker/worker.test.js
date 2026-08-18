@@ -327,7 +327,9 @@ test("free access keeps the existing limits and upgrade action", async () => {
   assert.match(replies[2], /includes 5 watched accounts/);
   assert.match(replies[3], /Free plan includes exactly one/);
   assert.match(replies[4], /🆓 <b>XGist Free<\/b>/);
-  assert.match(replies[4], /Upgrade with \/pro/);
+  assert.match(replies[4], /Update to 25 accounts, 6 schedules and more with \/pro/);
+  assert.equal(replies[4].split("\n").at(-1),
+    "Update to 25 accounts, 6 schedules and more with /pro");
 });
 
 test("setup and help commands have no response", async () => {
@@ -395,6 +397,10 @@ test("settings shows saved configuration and safe edit actions without resetting
   assert.match(settings.params.text, /Timezone: Europe\/Kyiv/);
   assert.match(settings.params.text, /Active Digest times: 09:00/);
   assert.match(settings.params.text, /Retained Digest times: 18:00/);
+  assert.ok(settings.params.text.indexOf("Update to 25 accounts") <
+    settings.params.text.indexOf("Inactive Pro configuration"));
+  assert.match(settings.params.text,
+    /<blockquote><i>🔒 Inactive Pro configuration[\s\S]*<\/i><\/blockquote>/);
   assert.match(settings.params.text, /Publishing channel: @briefings/);
   assert.match(settings.params.text, /Language: Ukrainian/);
   assert.match(settings.params.text, /Style: quiet/);
@@ -479,6 +485,34 @@ test("account commands prompt for input and remove multiple accounts with tiles"
   assert.equal(harness.user(129).account_removal_choices, undefined);
   const result = harness.telegram.findLast(({ method }) => method === "editMessageText");
   assert.match(result.params.text, /Removed 2 Watched accounts/);
+});
+
+test("Free account tiles distinguish active and retained accounts", async () => {
+  const sources = ["zero", "one", "two", "three", "four", "five", "six"];
+  const harness = createHarness({
+    users: { 138: activatedUser({
+      sources,
+      free_active_sources: sources.slice(0, 5),
+    }) },
+  });
+
+  await sendUpdate(harness, message(138, "/list"));
+  const view = harness.telegram.find(({ method }) => method === "sendMessage");
+  assert.match(view.params.text, /5 active · 2 retained for Pro · 7 saved/);
+  const labels = view.params.reply_markup.inline_keyboard.flat().map(({ text }) => text);
+  assert.ok(labels.includes("✓ @zero"));
+  assert.ok(labels.includes("🔒 @five"));
+  assert.ok(!labels.includes("➕ Add account"));
+  assert.equal(labels.at(-2), "Done");
+
+  await sendUpdate(harness, callback(138, "account:active:pick:0"));
+  await sendUpdate(harness, callback(138, "account:active:pick:5"));
+  assert.deepEqual(harness.user(138).account_active_choices,
+    ["one", "two", "three", "four", "five"]);
+  await sendUpdate(harness, callback(138, "account:active:done"));
+  assert.deepEqual(harness.user(138).free_active_sources,
+    ["one", "two", "three", "four", "five"]);
+  assert.equal(harness.user(138).account_active_choices, undefined);
 });
 
 test("setup reminders honor the 24-hour boundary and move with new activity", async () => {

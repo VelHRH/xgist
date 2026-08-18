@@ -121,7 +121,7 @@ function planPresentation(plan) {
   }
   return {
     label: "🆓 <b>XGist Free</b>",
-    details: "Upgrade with /pro",
+    details: "Update to 25 accounts, 6 schedules and more with /pro",
   };
 }
 
@@ -484,6 +484,9 @@ const CHANNEL_NOT_NOW = "channel:not-now";
 const NAV_SETUP = "nav:setup";
 const SETUP_EDIT = "setup:edit:";
 const ACCOUNT_ADD = "account:add";
+const ACCOUNT_ACTIVE_PICK = "account:active:pick:";
+const ACCOUNT_ACTIVE_DONE = "account:active:done";
+const ACCOUNT_ACTIVE_INFO = "account:active:info";
 const ACCOUNT_REMOVE_OPEN = "account:remove:open";
 const ACCOUNT_REMOVE_PICK = "account:remove:pick:";
 const ACCOUNT_REMOVE_DONE = "account:remove:done";
@@ -1314,14 +1317,42 @@ async function accountSettingsView(env, chatId) {
   const user = (await loadUser(env, chatId)) || userDefaults();
   const plan = await resolvePlan(env, chatId, user);
   const sources = user.sources || [];
-  const keyboard = [[{ text: "➕ Add account", callback_data: ACCOUNT_ADD }]];
+  const required = Math.min(plan.limits.sources, sources.length);
+  const selectable = plan.tier === "free" && sources.length > plan.limits.sources;
+  const access = configurationAccess(user, plan);
+  const choices = selectable && Array.isArray(user.account_active_choices)
+    ? user.account_active_choices.filter((source) => sources.includes(source))
+    : access.activeSources;
+  const active = new Set(choices);
+  const keyboard = [];
+  for (let index = 0; index < sources.length; index += 2) {
+    keyboard.push(sources.slice(index, index + 2).map((source, offset) => ({
+      text: `${active.has(source) ? "✓ " : "🔒 "}@${source}`,
+      callback_data: selectable
+        ? `${ACCOUNT_ACTIVE_PICK}${index + offset}` : ACCOUNT_ACTIVE_INFO,
+    })));
+  }
+  if (selectable) {
+    keyboard.push([{ text: "Done", callback_data: ACCOUNT_ACTIVE_DONE }]);
+  }
+  if (sources.length < plan.limits.sources) {
+    keyboard.push([{ text: "➕ Add account", callback_data: ACCOUNT_ADD }]);
+  }
   if (sources.length) {
     keyboard.push([{ text: "🗑 Remove accounts", callback_data: ACCOUNT_REMOVE_OPEN }]);
   }
+  const retained = sources.length - active.size;
   return {
     text: "👀 <b>Watched accounts</b>\n\n" +
-      (sources.length ? sources.map(xlink).join("\n") : "No accounts added yet.") +
-      `\n\n${sources.length}/${plan.limits.sources} accounts used.`,
+      (selectable
+        ? `Choose exactly ${required} active accounts. ✓ accounts are watched now; ` +
+          "🔒 accounts are saved and become available with Pro.\n\n"
+        : sources.length ? "Every saved account below is active.\n\n" : "No accounts added yet.\n\n") +
+      `${active.size} active` +
+      (retained ? ` · ${retained} retained for Pro` : "") +
+      ` · ${sources.length} saved\n` +
+      `Plan maximum: ${plan.limits.sources} active account` +
+      `${plan.limits.sources === 1 ? "" : "s"}.`,
     reply_markup: { inline_keyboard: keyboard },
   };
 }
@@ -1431,20 +1462,37 @@ async function settingsView(env, chatId) {
   const u = (await loadUser(env, chatId)) || userDefaults();
   const plan = await resolvePlan(env, chatId, u);
   const presentation = planPresentation(plan);
+  const access = configurationAccess(u, plan);
   const langNames = { en: "English", uk: "Ukrainian", ru: "Russian" };
   const paused = !!u.paused;
   const lines = [
     "⚙️ <b>Settings</b>",
     "",
     `📢 Publishing channel: ${u.channel ? esc(String(u.channel)) : "not connected"}`,
-    ...configurationLines(u, plan),
+    `👀 Active Watched accounts: ${access.activeSources.length
+      ? access.activeSources.map(xlink).join(", ") : "none"}`,
+    `🕘 Active Digest times: ${formatDigestTimes(access.activeHours) || "none"}`,
     `🌍 Timezone: ${u.timezone ? esc(u.timezone) : "Europe/Kyiv (default)"}`,
     `🌐 Language: ${langNames[u.language || "en"]}`,
     `✍️ Style: ${u.style ? esc(u.style) : "default"}`,
     `🔢 Posts per digest: ${u.limit || 3}`,
-    `${presentation.label}\n${presentation.details}\nMaximum: ${planCapacity(plan)}`,
+    `${presentation.label}\n` +
+      (plan.tier === "pro" ? `${presentation.details}\n` : "") +
+      `Maximum: ${planCapacity(plan)}`,
     paused ? "⏸ Digest: Paused" : "▶️ Digest: Active",
   ];
+  if (plan.tier === "free") lines.push(presentation.details);
+  if (access.inactiveSources.length || access.inactiveHours.length) {
+    const retained = ["🔒 Inactive Pro configuration"];
+    if (access.inactiveSources.length) {
+      retained.push(`👀 Retained accounts: ${access.inactiveSources.map(xlink).join(", ")}`);
+    }
+    if (access.inactiveHours.length) {
+      retained.push(`🕘 Retained Digest times: ${formatDigestTimes(access.inactiveHours)}`);
+    }
+    retained.push("Renew Pro access to reactivate everything without re-entry.");
+    lines.push(`<blockquote><i>${retained.join("\n")}</i></blockquote>`);
+  }
   return {
     text: lines.join("\n"),
     reply_markup: { inline_keyboard: [
@@ -2077,6 +2125,64 @@ async function handleCallback(cb, env) {
     return promptAccountInput(env, chatId);
   }
 
+  if (cb.data === ACCOUNT_ACTIVE_INFO) {
+    return answer("This account is active on your current plan.");
+  }
+
+  if (cb.data.startsWith(ACCOUNT_ACTIVE_PICK)) {
+    const user = await loadUser(env, chatId);
+    if (!user) return answer("That account list expired.", true);
+    const plan = await resolvePlan(env, chatId, user);
+    const sources = user.sources || [];
+    const required = Math.min(plan.limits.sources, sources.length);
+    const index = Number(cb.data.slice(ACCOUNT_ACTIVE_PICK.length));
+    const source = sources[index];
+    if (!source || plan.tier !== "free" || sources.length <= plan.limits.sources) {
+      return answer("That account list expired.", true);
+    }
+    const initial = Array.isArray(user.account_active_choices)
+      ? user.account_active_choices
+      : configurationAccess(user, plan).activeSources;
+    const selected = new Set(initial.filter((item) => sources.includes(item)));
+    if (selected.has(source)) selected.delete(source);
+    else if (selected.size < required) selected.add(source);
+    else return answer(`Choose exactly ${required}. Deselect an active account first.`, true);
+    user.account_active_choices = [...selected];
+    await saveUser(env, chatId, user);
+    await answer("");
+    const view = await accountSettingsView(env, chatId);
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId, text: view.text,
+      parse_mode: "HTML", reply_markup: view.reply_markup,
+      link_preview_options: { is_disabled: true },
+    });
+  }
+
+  if (cb.data === ACCOUNT_ACTIVE_DONE) {
+    const user = await loadUser(env, chatId);
+    if (!user) return answer("That account list expired.", true);
+    const plan = await resolvePlan(env, chatId, user);
+    const sources = user.sources || [];
+    const required = Math.min(plan.limits.sources, sources.length);
+    const selected = [...new Set(user.account_active_choices ||
+      configurationAccess(user, plan).activeSources)]
+      .filter((source) => sources.includes(source));
+    if (plan.tier !== "free" || selected.length !== required) {
+      return answer(`Select exactly ${required} active accounts first.`, true);
+    }
+    user.free_active_sources = selected;
+    delete user.account_active_choices;
+    await saveUser(env, chatId, user);
+    await answer("Active accounts updated");
+    const view = await accountSettingsView(env, chatId);
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId,
+      text: "✅ Active Watched accounts updated.\n\n" + view.text,
+      parse_mode: "HTML", reply_markup: view.reply_markup,
+      link_preview_options: { is_disabled: true },
+    });
+  }
+
   if (cb.data === ACCOUNT_REMOVE_OPEN) {
     await answer("");
     const user = (await loadUser(env, chatId)) || userDefaults();
@@ -2121,6 +2227,7 @@ async function handleCallback(cb, env) {
     }
     for (const source of selected) clearAccountHealth(user, source);
     if (selected.has(user.account_replacement?.old_handle)) delete user.account_replacement;
+    delete user.account_active_choices;
     delete user.account_removal_choices;
     await saveUser(env, chatId, user);
     const view = await accountSettingsView(env, chatId);
