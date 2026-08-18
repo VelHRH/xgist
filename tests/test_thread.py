@@ -80,6 +80,7 @@ class ThreadDeliveryTest(unittest.TestCase):
             "pending": {},
         }
         saved = {}
+        saved_users = {}
         controls = []
         media_limits = []
         item = {
@@ -90,11 +91,15 @@ class ThreadDeliveryTest(unittest.TestCase):
                 "os.environ", {"FORCE_USER": "7"}), patch.multiple(
                 digest,
                 TMP_DIR=Path(temp_dir) / "media",
-                load_users=lambda: {"7": {"channel": None}},
+                load_users=lambda: {"7": {
+                    "channel": None,
+                    "setup": {"completed_at": "2026-01-01T00:00:00+00:00"},
+                }},
                 load_state=lambda: {"7": state},
                 fetch_thread=lambda url: item,
                 prepare=lambda media, limit: media_limits.append(limit) or ["prepared"],
                 make_caption=lambda value, config: "Clean post",
+                save_user=lambda uid, value: saved_users.update({uid: value}),
                 save_user_state=lambda uid, value: saved.update({uid: value}),
         ), patch.object(digest.tg, "send_preview",
                         lambda chat_id, media, caption: [{"message_id": 50}]), \
@@ -115,6 +120,7 @@ class ThreadDeliveryTest(unittest.TestCase):
         self.assertIn("🔁 3", controls[0])
         self.assertIn("🧵", controls[0])
         self.assertIn("No Publishing channel connected yet", controls[0])
+        self.assertIn("first_preview_delivered_at", saved_users["7"]["setup"])
 
     def test_failed_fetch_refunds_quota(self):
         refunded = []

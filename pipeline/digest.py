@@ -15,7 +15,7 @@ from . import tg
 from .caption import make_caption
 from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, THREAD_MEDIA_CAP,
                      TMP_DIR, load_feedback, load_promo, load_state, load_users,
-                     load_whitelist, refund_thread_quota, save_user_state,
+                     load_whitelist, refund_thread_quota, save_user, save_user_state,
                      should_alert)
 from .fetch import AuthError, fetch_source, fetch_thread
 from .media import prepare
@@ -152,6 +152,14 @@ def _record_pending(user_state: dict, content_ids: list[int], *,
         pending.pop(next(iter(pending)))
 
 
+def _record_first_preview(uid: str, cfg: dict, delivered_at: datetime) -> None:
+    setup = cfg.get("setup")
+    if not setup or setup.get("first_preview_delivered_at"):
+        return
+    setup["first_preview_delivered_at"] = delivered_at.isoformat()
+    save_user(uid, cfg)
+
+
 def run_thread(thread_url: str) -> None:
     """On-demand flow: build a single Thread-post Preview from a pasted link
     and append it to the target user's pending previews, without touching any
@@ -188,6 +196,7 @@ def run_thread(thread_url: str) -> None:
 
     caption = make_caption(thread, cfg)
     msgs = tg.send_preview(int(uid), media, caption)
+    _record_first_preview(uid, cfg, datetime.now(timezone.utc))
     content_ids = [m["message_id"] for m in msgs]
     tg.send_controls(
         int(uid), content_ids,
@@ -218,9 +227,10 @@ def main() -> None:
     whitelist = load_whitelist()
     promo = load_promo()
     admin_id = os.getenv("ADMIN_ID", "").strip()
+    stored_users = load_users()
     users = {uid: apply_plan(
                  cfg, resolve_plan(uid, cfg, whitelist, promo, admin_id, now))
-             for uid, cfg in load_users().items()}
+             for uid, cfg in stored_users.items()}
     state = load_state()
 
     force_user = os.getenv("FORCE_USER", "").strip()
@@ -306,6 +316,7 @@ def main() -> None:
         for tweet, media, caption in prepared:
             try:
                 msgs = tg.send_preview(int(uid), media, caption)
+                _record_first_preview(uid, stored_users[uid], now)
                 content_ids = [m["message_id"] for m in msgs]
                 tg.send_controls(
                     int(uid), content_ids,
