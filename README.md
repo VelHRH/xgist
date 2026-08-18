@@ -213,7 +213,10 @@ fetched once per run regardless of how many users watch them.
 6 times/day and 25 sources (the `LIMITS` table in `worker/worker.js`,
 mirrored by the effective plan model in `pipeline/plans.py`). Paid, trial,
 whitelisted, and administrator access share the Pro limits while retaining
-distinct plan identities in bot messages.
+distinct plan identities in bot messages. When Pro access ends, excess sources
+and Digest times remain stored as inactive Pro configuration. The user can
+choose the Free-active subset, or the first five sources and first configured
+time are used until Pro access restores the full configuration.
 
 **Payments:** `/pro` sells a monthly auto-renewing subscription via Telegram
 Stars — no external payment provider needed. Price is the `PRO_PRICE_STARS`

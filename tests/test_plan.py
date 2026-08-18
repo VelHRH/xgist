@@ -62,6 +62,45 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(len(cfg["hours"]), 8)
         self.assertEqual(applied["_plan"], free)
 
+    def test_free_plan_uses_selection_or_deterministic_fallback(self):
+        cfg = {
+            "sources": [str(i) for i in range(8)],
+            "hours": [7, 12, 18],
+            "free_active_sources": ["1", "3", "4", "6", "7"],
+            "free_active_hours": [18],
+        }
+        free = resolve_plan("1", cfg, [], [], "99", self.now)
+        applied = apply_plan(cfg, free)
+        self.assertEqual(applied["sources"], ["1", "3", "4", "6", "7"])
+        self.assertEqual(applied["hours"], [18])
+
+        cfg["free_active_sources"] = ["missing"]
+        cfg["free_active_hours"] = []
+        applied = apply_plan(cfg, free)
+        self.assertEqual(applied["sources"], ["0", "1", "2", "3", "4"])
+        self.assertEqual(applied["hours"], [7])
+
+    def test_every_pro_source_restores_all_retained_configuration(self):
+        cfg = {
+            "sources": [str(i) for i in range(8)],
+            "hours": [7, 12, 18],
+            "free_active_sources": ["1", "3", "4", "6", "7"],
+            "free_active_hours": [18],
+            "paid_until": self.future,
+            "pro_source": "paid",
+        }
+        cases = [
+            resolve_plan("1", cfg, [], [], "99", self.now),
+            resolve_plan("1", {**cfg, "pro_source": "trial"}, [], [], "99", self.now),
+            resolve_plan("1", {**cfg, "paid_until": None}, ["1"], [], "99", self.now),
+            resolve_plan("99", {**cfg, "paid_until": None}, [], [], "99", self.now),
+        ]
+        for plan in cases:
+            with self.subTest(source=plan["source"]):
+                applied = apply_plan(cfg, plan)
+                self.assertEqual(applied["sources"], cfg["sources"])
+                self.assertEqual(applied["hours"], cfg["hours"])
+
 
 if __name__ == "__main__":
     unittest.main()

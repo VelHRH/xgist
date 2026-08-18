@@ -52,7 +52,12 @@ class DigestHarness:
         self.preview_error = preview_error
         self.events = []
         self.user_saves = []
+        self.fetched_sources = []
         self.next_message_id = 1
+
+    def fetch_source(self, source):
+        self.fetched_sources.append(source)
+        return copy.deepcopy(self.fetched[source])
 
     def send_preview(self, chat_id, media, caption):
         if self.preview_error:
@@ -91,7 +96,7 @@ class DigestHarness:
                 load_promo=lambda: [],
                 load_state=lambda: self.state,
                 load_feedback=lambda: {},
-                fetch_source=lambda source: copy.deepcopy(self.fetched[source]),
+                fetch_source=self.fetch_source,
                 prepare=lambda media: [],
                 make_caption=lambda item, cfg: "Prepared caption",
                 pick_top=lambda candidates, cfg: candidates,
@@ -105,6 +110,30 @@ class DigestHarness:
 
 
 class DigestDeliveryTest(unittest.TestCase):
+    def test_free_digest_fetches_only_selected_active_accounts(self):
+        now = datetime.now(timezone.utc)
+        active = ["one", "three", "four", "six", "seven"]
+        harness = DigestHarness(
+            users={
+                "1": timezone_confirmed({
+                    "channel": None,
+                    "sources": ["zero", "one", "two", "three", "four", "five", "six", "seven"],
+                    "hours": [7, 12, 18],
+                    "free_active_sources": active,
+                    "free_active_hours": [18],
+                }),
+            },
+            state={},
+            fetched={source: [tweet(now - timedelta(hours=1))] for source in active},
+        )
+
+        harness.run()
+
+        self.assertEqual(sorted(harness.fetched_sources), sorted(active))
+        self.assertNotIn("zero", harness.fetched_sources)
+        self.assertNotIn("two", harness.fetched_sources)
+        self.assertNotIn("five", harness.fetched_sources)
+
     def test_channel_optional_delivery_and_pro_briefing(self):
         now = datetime.now(timezone.utc)
         paid_until = (now + timedelta(days=10)).isoformat()

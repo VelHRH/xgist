@@ -501,6 +501,9 @@ const NAV_SETUP = "nav:setup";
 const NAV_HELP = "nav:help";
 const SETUP_EDIT = "setup:edit:";
 const HELP_TOPIC = "help:topic:";
+const DOWNGRADE_SOURCE = "downgrade:source:";
+const DOWNGRADE_HOUR = "downgrade:hour:";
+const DOWNGRADE_DONE = "downgrade:done";
 const CITY_TIMEZONE_CHOICES = {
   kyiv: [{ label: "Kyiv, Ukraine", zone: "Europe/Kyiv" }],
   kiev: [{ label: "Kyiv, Ukraine", zone: "Europe/Kyiv" }],
@@ -621,14 +624,118 @@ function planCapacity(plan) {
     `${plan.limits.hours === 1 ? "" : "s"}/day`;
 }
 
+function selectedFreeValues(configured, selected, limit) {
+  const values = [...new Set(configured || [])];
+  const required = Math.min(limit, values.length);
+  const chosen = [...new Set(selected || [])].filter((value) => values.includes(value));
+  return chosen.length === required ? chosen : values.slice(0, limit);
+}
+
+function configurationAccess(user, plan) {
+  const sources = [...new Set(user.sources || [])];
+  const hours = [...new Set(user.hours || [])];
+  if (plan.tier === "pro") {
+    return { activeSources: sources, inactiveSources: [], activeHours: hours, inactiveHours: [] };
+  }
+  const activeSources = selectedFreeValues(
+    sources, user.free_active_sources, plan.limits.sources);
+  const activeHours = selectedFreeValues(hours, user.free_active_hours, plan.limits.hours);
+  return {
+    activeSources,
+    inactiveSources: sources.filter((source) => !activeSources.includes(source)),
+    activeHours,
+    inactiveHours: hours.filter((hour) => !activeHours.includes(hour)),
+  };
+}
+
+function ensureFreeSelections(user, plan) {
+  const sources = [...new Set(user.sources || [])];
+  const hours = [...new Set(user.hours || [])];
+  user.free_active_sources = Array.isArray(user.free_active_sources)
+    ? [...new Set(user.free_active_sources)].filter((value) => sources.includes(value))
+    : selectedFreeValues(sources, null, plan.limits.sources);
+  user.free_active_hours = Array.isArray(user.free_active_hours)
+    ? [...new Set(user.free_active_hours)].filter((value) => hours.includes(value))
+    : selectedFreeValues(hours, null, plan.limits.hours);
+  return configurationAccess(user, plan);
+}
+
+function configurationLines(user, plan) {
+  const access = configurationAccess(user, plan);
+  const lines = [
+    `👀 Active Watched accounts: ${access.activeSources.length
+      ? access.activeSources.map(xlink).join(", ") : "none"}`,
+    `🕘 Active Digest times: ${formatDigestTimes(access.activeHours) || "none"}`,
+  ];
+  if (access.inactiveSources.length || access.inactiveHours.length) {
+    lines.push("", "🔒 <b>Inactive Pro configuration</b>");
+    if (access.inactiveSources.length) {
+      lines.push(`👀 Retained accounts: ${access.inactiveSources.map(xlink).join(", ")}`);
+    }
+    if (access.inactiveHours.length) {
+      lines.push(`🕘 Retained Digest times: ${formatDigestTimes(access.inactiveHours)}`);
+    }
+    lines.push("Renew Pro access to reactivate everything without re-entry.");
+  }
+  return lines;
+}
+
+function downgradeView(user, plan) {
+  const sources = [...new Set(user.sources || [])];
+  const hours = [...new Set(user.hours || [])];
+  const fallback = configurationAccess(user, plan);
+  const selectedSources = Array.isArray(user.free_active_sources)
+    ? [...new Set(user.free_active_sources)].filter((source) => sources.includes(source))
+    : fallback.activeSources;
+  const selectedHours = Array.isArray(user.free_active_hours)
+    ? [...new Set(user.free_active_hours)].filter((hour) => hours.includes(hour))
+    : fallback.activeHours;
+  const inactiveSources = sources.filter((source) => !selectedSources.includes(source));
+  const inactiveHours = hours.filter((hour) => !selectedHours.includes(hour));
+  const sourceButtons = sources.map((source, index) => ({
+    text: `${selectedSources.includes(source) ? "✓ " : ""}@${source}`,
+    callback_data: `${DOWNGRADE_SOURCE}${index}`,
+  }));
+  const hourButtons = hours.map((hour) => ({
+    text: `${selectedHours.includes(hour) ? "✓ " : ""}${String(hour).padStart(2, "0")}:00`,
+    callback_data: `${DOWNGRADE_HOUR}${hour}`,
+  }));
+  const keyboard = [];
+  for (let index = 0; index < sourceButtons.length; index += 2) {
+    keyboard.push(sourceButtons.slice(index, index + 2));
+  }
+  for (let index = 0; index < hourButtons.length; index += 3) {
+    keyboard.push(hourButtons.slice(index, index + 3));
+  }
+  keyboard.push([{ text: "Done", callback_data: DOWNGRADE_DONE }]);
+  return {
+    text: "🆓 <b>Pro access ended · your configuration is retained</b>\n\n" +
+      `Free keeps ${plan.limits.sources} Watched accounts and ` +
+      `${plan.limits.hours} Digest time active. Choose the active items below; ` +
+      "everything else stays as Inactive Pro configuration.\n\n" +
+      `👀 Selected: ${selectedSources.length}/${Math.min(plan.limits.sources, sources.length)}` +
+      `${selectedSources.length ? ` · ${selectedSources.map(xlink).join(", ")}` : ""}\n` +
+      `🕘 Selected: ${selectedHours.length}/${Math.min(plan.limits.hours, hours.length)}` +
+      `${selectedHours.length ? ` · ${formatDigestTimes(selectedHours)}` : ""}\n\n` +
+      "🔒 <b>Inactive Pro configuration</b>\n" +
+      `👀 ${inactiveSources.length ? inactiveSources.map(xlink).join(", ") : "none"}\n` +
+      `🕘 ${formatDigestTimes(inactiveHours) || "none"}`,
+    reply_markup: { inline_keyboard: keyboard },
+  };
+}
+
 function homeView(user, plan, firstName) {
-  const hours = formatDigestTimes(user.hours);
-  const briefings = user.hours?.length || 0;
+  const access = configurationAccess(user, plan);
+  const hours = formatDigestTimes(access.activeHours);
+  const retained = access.inactiveSources.length + access.inactiveHours.length;
   const name = firstName ? `${esc(firstName)}, your` : "Your";
   return {
     text: `🏠 <b>${name} daily briefings</b>\n\n` +
-      `🕘 ${briefings} configured${hours ? ` · ${hours}` : ""}\n` +
-      `👀 ${user.sources?.length || 0} Watched account${user.sources?.length === 1 ? "" : "s"}\n` +
+      `🕘 ${access.activeHours.length} active${hours ? ` · ${hours}` : ""}\n` +
+      `👀 ${access.activeSources.length} active Watched account` +
+      `${access.activeSources.length === 1 ? "" : "s"}\n` +
+      (retained ? `🔒 ${access.inactiveSources.length} account(s) and ` +
+        `${access.inactiveHours.length} Digest time(s) retained for Pro\n` : "") +
       `🌍 Timezone: ${user.timezone ? esc(user.timezone) : "not set"}\n` +
       `📢 Publishing channel: ${user.channel ? esc(String(user.channel)) : "not connected"}\n\n` +
       planPresentation(plan).label,
@@ -657,9 +764,8 @@ async function setupView(env, chatId) {
   const plan = await resolvePlan(env, chatId, user);
   return {
     text: "⚙️ <b>Current setup</b>\n\n" +
-      `👀 Watched accounts: ${user.sources?.length ? user.sources.map(xlink).join(", ") : "none"}\n` +
+      configurationLines(user, plan).join("\n") + "\n" +
       `🌍 Timezone: ${user.timezone ? esc(user.timezone) : "not set"}\n` +
-      `🕘 Digest times: ${formatDigestTimes(user.hours) || "not set"}\n` +
       `📢 Publishing channel: ${user.channel ? esc(String(user.channel)) : "not connected"}\n\n` +
       `${planPresentation(plan).label}\nMaximum: ${planCapacity(plan)}`,
     reply_markup: { inline_keyboard: [
@@ -726,7 +832,21 @@ async function activateWithDigestTimes(env, chatId, hours, from) {
       `Your plan includes ${plan.limits.hours} active daily Digest time` +
       `${plan.limits.hours === 1 ? "" : "s"}.`);
   }
-  user.hours = selected;
+  if (plan.tier === "free" && wasActivated &&
+      (user.hours || []).length > plan.limits.hours) {
+    const current = configurationAccess(user, plan).activeHours[0];
+    if (!user.hours.includes(selected[0])) {
+      const retained = [...user.hours];
+      const index = retained.indexOf(current);
+      if (index >= 0) retained[index] = selected[0];
+      else retained.push(selected[0]);
+      user.hours = [...new Set(retained)];
+    }
+    user.free_active_hours = selected;
+  } else {
+    user.hours = selected;
+    if (plan.tier === "free") user.free_active_hours = selected;
+  }
   updateSetup(user);
   if (!user.sources?.length || !user.setup.timezone_confirmed_at) {
     user.setup.current_step = requiredSetupStep(user);
@@ -1001,12 +1121,36 @@ async function sendProInvites(env) {
       promotional: promotional.has(id),
     });
     if (plan.tier === "pro") {
-      if (user.free_since || user.pro_invite_sent_at) {
+      if (!user.pro_access_seen_at || user.free_since || user.pro_invite_sent_at ||
+          user.downgrade_notified_at) {
+        user.pro_access_seen_at = new Date(now).toISOString();
         delete user.free_since;
         delete user.pro_invite_sent_at;
+        delete user.downgrade_notified_at;
         await saveUser(env, id, user);
       }
       continue;
+    }
+    const excess = (user.sources || []).length > plan.limits.sources ||
+      (user.hours || []).length > plan.limits.hours;
+    if (excess) {
+      const previousSources = JSON.stringify(user.free_active_sources || null);
+      const previousHours = JSON.stringify(user.free_active_hours || null);
+      ensureFreeSelections(user, plan);
+      if (previousSources !== JSON.stringify(user.free_active_sources) ||
+          previousHours !== JSON.stringify(user.free_active_hours)) {
+        await saveUser(env, id, user);
+      }
+      const hadProAccess = !!(user.paid_until || user.pro_source || user.pro_access_seen_at);
+      if (hadProAccess && !user.downgrade_notified_at) {
+        const view = downgradeView(user, plan);
+        const sent = await reply(env, Number(id), view.text,
+          { reply_markup: view.reply_markup });
+        if (sent.ok) {
+          user.downgrade_notified_at = new Date(now).toISOString();
+          await saveUser(env, id, user);
+        }
+      }
     }
     if (!user.free_since) {
       const expiredAt = Date.parse(user.paid_until);
@@ -1162,8 +1306,7 @@ async function settingsView(env, chatId) {
     "⚙️ <b>Your setup</b>",
     "",
     `📢 Publishing channel: ${u.channel ? esc(String(u.channel)) : "not set — /channel @yourchannel"}`,
-    `👀 Watched accounts: ${u.sources?.length ? u.sources.map(xlink).join(", ") : "none — /add @naval"}`,
-    `🕘 Digest times: ${formatDigestTimes(u.hours) || "not set — /schedule 9"}`,
+    ...configurationLines(u, plan),
     `🌍 Timezone: ${u.timezone ? esc(u.timezone) : "Europe/Kyiv (default)"}`,
     `🌐 Language: ${langNames[u.language || "en"]}`,
     `✍️ Style: ${u.style ? esc(u.style) : "default"}`,
@@ -1422,15 +1565,19 @@ async function handleMessage(msg, env, ctx) {
       const handle = arg.replace(/^@/, "").toLowerCase();
       return setField(env, chatId, (u) => {
         u.sources = u.sources.filter((s) => s !== handle);
+        if (u.free_active_sources) {
+          u.free_active_sources = u.free_active_sources.filter((s) => s !== handle);
+        }
       }, `🗑 Removed <code>@${esc(handle)}</code>`);
     }
 
     case "/list": {
       const u = await loadUser(env, chatId);
-      return reply(env, chatId,
-        u?.sources?.length
-          ? "👀 You're watching:\n" + u.sources.map(xlink).join("\n")
-          : "You're not watching anyone yet — try /add @naval");
+      if (!u?.sources?.length) {
+        return reply(env, chatId, "You're not watching anyone yet — try /add @naval");
+      }
+      const plan = await resolvePlan(env, chatId, u);
+      return reply(env, chatId, configurationLines(u, plan).join("\n"));
     }
 
     case "/times":
@@ -1641,6 +1788,93 @@ async function handleCallback(cb, env) {
     const topic = HELP_TOPICS[cb.data.slice(HELP_TOPIC.length)];
     if (topic) return reply(env, chatId, topic);
     return;
+  }
+
+  if (cb.data.startsWith(DOWNGRADE_SOURCE)) {
+    const user = await loadUser(env, chatId);
+    if (!user) return answer("That selection expired.", true);
+    const plan = await resolvePlan(env, chatId, user);
+    if (plan.tier === "pro") {
+      await answer("Pro access restored");
+      return reply(env, chatId,
+        "⭐ Pro access is active again. All retained configuration is active.");
+    }
+    ensureFreeSelections(user, plan);
+    const index = Number(cb.data.slice(DOWNGRADE_SOURCE.length));
+    const source = user.sources?.[index];
+    if (!source) return answer("That account is no longer configured.", true);
+    const selected = new Set(user.free_active_sources);
+    if (selected.has(source)) selected.delete(source);
+    else if (selected.size < Math.min(plan.limits.sources, user.sources.length)) {
+      selected.add(source);
+    } else {
+      return answer("Deselect an active account first.", true);
+    }
+    user.free_active_sources = [...selected];
+    await saveUser(env, chatId, user);
+    await answer("");
+    const view = downgradeView(user, plan);
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId, text: view.text,
+      parse_mode: "HTML", reply_markup: view.reply_markup,
+      link_preview_options: { is_disabled: true },
+    });
+  }
+
+  if (cb.data.startsWith(DOWNGRADE_HOUR)) {
+    const user = await loadUser(env, chatId);
+    if (!user) return answer("That selection expired.", true);
+    const plan = await resolvePlan(env, chatId, user);
+    if (plan.tier === "pro") {
+      await answer("Pro access restored");
+      return reply(env, chatId,
+        "⭐ Pro access is active again. All retained configuration is active.");
+    }
+    const hour = Number(cb.data.slice(DOWNGRADE_HOUR.length));
+    if (!user.hours?.includes(hour)) {
+      return answer("That Digest time is no longer configured.", true);
+    }
+    user.free_active_hours = [hour];
+    await saveUser(env, chatId, user);
+    await answer("");
+    const view = downgradeView(user, plan);
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId, text: view.text,
+      parse_mode: "HTML", reply_markup: view.reply_markup,
+      link_preview_options: { is_disabled: true },
+    });
+  }
+
+  if (cb.data === DOWNGRADE_DONE) {
+    const user = await loadUser(env, chatId);
+    if (!user) return answer("That selection expired.", true);
+    const plan = await resolvePlan(env, chatId, user);
+    if (plan.tier === "pro") {
+      await answer("Pro access restored");
+      return reply(env, chatId,
+        "⭐ Pro access is active again. All retained configuration is active.");
+    }
+    const sources = [...new Set(user.sources || [])];
+    const hours = [...new Set(user.hours || [])];
+    const selectedSources = [...new Set(user.free_active_sources || [])]
+      .filter((source) => sources.includes(source));
+    const selectedHours = [...new Set(user.free_active_hours || [])]
+      .filter((hour) => hours.includes(hour));
+    if (selectedSources.length !== Math.min(plan.limits.sources, sources.length) ||
+        selectedHours.length !== Math.min(plan.limits.hours, hours.length)) {
+      return answer("Select the required active accounts and Digest time first.", true);
+    }
+    user.free_active_sources = selectedSources;
+    user.free_active_hours = selectedHours;
+    await saveUser(env, chatId, user);
+    await answer("Free configuration saved");
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId,
+      text: "✅ <b>Free configuration saved</b>\n\n" +
+        configurationLines(user, plan).join("\n"),
+      parse_mode: "HTML", reply_markup: { inline_keyboard: [] },
+      link_preview_options: { is_disabled: true },
+    });
   }
 
   if (cb.data.startsWith(SETUP_EDIT)) {

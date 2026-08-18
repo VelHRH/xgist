@@ -327,8 +327,9 @@ test("activated start shows plan-aware configured value while unactivated start 
 
   const freeHome = sentTo(free, 120)[0];
   assert.match(freeHome, /^🏠 <b>Alice, your daily briefings<\/b>/);
-  assert.match(freeHome, /2 configured · 09:00, 18:00/);
-  assert.match(freeHome, /2 Watched accounts/);
+  assert.match(freeHome, /1 active · 09:00/);
+  assert.match(freeHome, /2 active Watched accounts/);
+  assert.match(freeHome, /1 Digest time\(s\) retained for Pro/);
   assert.match(freeHome, /Timezone: Europe\/Kyiv/);
   assert.match(freeHome, /Publishing channel: @briefings/);
   assert.match(freeHome, /XGist Free/);
@@ -371,7 +372,8 @@ test("setup shows saved configuration and safe edit actions without resetting it
   assert.match(setup.params.text, /Current setup/);
   assert.match(setup.params.text, /Watched accounts:.*naval.*pmarca/);
   assert.match(setup.params.text, /Timezone: Europe\/Kyiv/);
-  assert.match(setup.params.text, /Digest times: 09:00, 18:00/);
+  assert.match(setup.params.text, /Active Digest times: 09:00/);
+  assert.match(setup.params.text, /Retained Digest times: 18:00/);
   assert.match(setup.params.text, /Publishing channel: @briefings/);
   assert.match(setup.params.text, /Maximum: 5 Watched accounts · 1 Digest time\/day/);
   assert.deepEqual(setup.params.reply_markup.inline_keyboard.flat().map(({ text }) => text), [
@@ -549,7 +551,8 @@ test("registered and hidden power-user commands remain available", async () => {
   assert.equal(harness.user(124).language, "uk");
   assert.equal(harness.user(124).style, "concise");
   assert.equal(harness.user(124).interests, "technology");
-  assert.deepEqual(harness.user(124).hours, [7]);
+  assert.deepEqual(harness.user(124).hours, [7, 18]);
+  assert.deepEqual(harness.user(124).free_active_hours, [7]);
 });
 
 test("a pasted status link dispatches a thread Preview and enforces the Free quota", async () => {
@@ -728,6 +731,113 @@ test("paid access changes to Free exactly at the expiry boundary", async () => {
   });
   await sendUpdateAt(justBefore, message(107, "/settings"), now);
   assert.match(sentTo(justBefore, 107)[0], /XGist Pro<\/b>/);
+});
+
+test("Pro expiry retains configuration and lets the user choose the Free-active subset", async () => {
+  const now = Date.parse("2026-08-16T12:00:00.000Z");
+  const sources = ["zero", "one", "two", "three", "four", "five", "six"];
+  const hours = [7, 12, 18];
+  const harness = createHarness({
+    users: {
+      117: activatedUser({
+        sources,
+        hours,
+        pro_source: "paid",
+        paid_until: new Date(now).toISOString(),
+      }),
+    },
+  });
+
+  await sendScheduledAt(harness, now);
+
+  let user = harness.user(117);
+  assert.deepEqual(user.sources, sources);
+  assert.deepEqual(user.hours, hours);
+  assert.deepEqual(user.free_active_sources, sources.slice(0, 5));
+  assert.deepEqual(user.free_active_hours, [7]);
+  const downgrade = sentTo(harness, 117).find((text) => /Pro access ended/.test(text));
+  assert.match(downgrade, /configuration is retained/);
+  assert.match(downgrade, /Inactive Pro configuration/);
+
+  await sendUpdateAt(harness, callback(117, "downgrade:source:0"), now);
+  assert.deepEqual(harness.user(117).free_active_sources,
+    ["one", "two", "three", "four"]);
+  await sendScheduledAt(harness, now + 1);
+  assert.deepEqual(harness.user(117).free_active_sources,
+    ["one", "two", "three", "four"]);
+  await sendUpdateAt(harness, callback(117, "downgrade:source:5"), now);
+  await sendUpdateAt(harness, callback(117, "downgrade:hour:18"), now);
+  await sendUpdateAt(harness, callback(117, "downgrade:done"), now);
+
+  user = harness.user(117);
+  assert.deepEqual(user.free_active_sources, ["one", "two", "three", "four", "five"]);
+  assert.deepEqual(user.free_active_hours, [18]);
+  assert.deepEqual(user.sources, sources);
+  assert.deepEqual(user.hours, hours);
+  const saved = harness.telegram.findLast(({ method }) => method === "editMessageText");
+  assert.match(saved.params.text, /Free configuration saved/);
+  assert.match(saved.params.text, /Retained accounts: .*@zero.*@six/);
+});
+
+test("a downgraded user's Scheduled publishes stay available", async () => {
+  const now = Date.now();
+  const dueHour = Number(new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Kyiv", hour: "2-digit", hourCycle: "h23",
+  }).format(new Date()));
+  const sources = ["zero", "one", "two", "three", "four", "five", "six"];
+  const hours = [7, 12, 18];
+  const harness = createHarness({
+    users: {
+      118: activatedUser({
+        channel: "@briefings",
+        channel_verified: { id: "@briefings" },
+        sources,
+        hours,
+        pro_source: "paid",
+        paid_until: new Date(now).toISOString(),
+      }),
+    },
+    states: { 118: { pending: { "40": { source: "zero", text: "Preview" } } } },
+    schedules: {
+      "118:1": JSON.stringify({
+        chat: 118, control: 1, ids: "40", tz: "Europe/Kyiv", hour: dueHour,
+      }),
+    },
+  });
+
+  await sendScheduledAt(harness, now);
+
+  assert.equal(harness.telegram.some(({ method }) => method === "copyMessages"), true);
+  assert.deepEqual(harness.user(118).sources, sources);
+  assert.deepEqual(harness.user(118).hours, hours);
+});
+
+test("renewed paid, trial, courtesy, and administrator Pro restore retained configuration", async () => {
+  const future = new Date(Date.now() + 10 * DAY).toISOString();
+  const retained = {
+    sources: ["zero", "one", "two", "three", "four", "five", "six"],
+    hours: [7, 12, 18],
+    free_active_sources: ["zero", "one", "two", "three", "four"],
+    free_active_hours: [7],
+  };
+  const cases = [
+    { id: 119, user: { paid_until: future, pro_source: "paid" } },
+    { id: 120, user: { paid_until: future, pro_source: "trial" } },
+    { id: 121, user: {}, harness: { whitelist: [121] } },
+    { id: 122, user: {}, env: { ADMIN_ID: "122" } },
+  ];
+  for (const item of cases) {
+    const harness = createHarness({
+      users: { [item.id]: activatedUser({ ...retained, ...item.user }) },
+      ...(item.harness || {}),
+    });
+    await sendUpdate(harness, message(item.id, "/settings"), item.env);
+    const settings = sentTo(harness, item.id)[0];
+    assert.match(settings,
+      /Active Watched accounts: .*@zero.*@one.*@two.*@three.*@four.*@five.*@six/);
+    assert.match(settings, /Active Digest times: 07:00, 12:00, 18:00/);
+    assert.doesNotMatch(settings, /Inactive Pro configuration/);
+  }
 });
 
 test("successful payment replaces trial identity with paid Pro", async () => {
