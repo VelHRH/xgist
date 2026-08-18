@@ -117,19 +117,25 @@ class AuthError(Exception):
     """Raised when the session is invalid (cookies expired)."""
 
 
+class SourceReadError(Exception):
+    pass
+
+
+def _auth_failure(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "no active accounts" in message or "403" in message
+
+
 async def _fetch_async(handle: str) -> list[dict]:
     api = await _get_api()
     try:
         user = await api.user_by_login(handle)
     except Exception as exc:
-        msg = str(exc)
-        if "no active accounts" in msg.lower() or "403" in msg:
+        if _auth_failure(exc):
             raise AuthError(f"session invalid for @{handle}: {exc}") from exc
-        log.error("could not resolve @%s: %s", handle, exc)
-        return []
+        raise SourceReadError(f"could not resolve @{handle}: {exc}") from exc
     if user is None:
-        log.warning("@%s not found", handle)
-        return []
+        raise SourceReadError(f"@{handle} not found")
 
     dest = TMP_DIR / handle
     dest.mkdir(parents=True, exist_ok=True)
@@ -151,7 +157,9 @@ async def _fetch_async(handle: str) -> list[dict]:
                 "media": media_paths,
             })
     except Exception as exc:
-        log.error("error fetching @%s: %s", handle, exc)
+        if _auth_failure(exc):
+            raise AuthError(f"session invalid for @{handle}: {exc}") from exc
+        raise SourceReadError(f"error fetching @{handle}: {exc}") from exc
 
     tweets.sort(key=lambda t: t["date"], reverse=True)
     return tweets
@@ -159,10 +167,12 @@ async def _fetch_async(handle: str) -> list[dict]:
 
 def fetch_source(handle: str) -> list[dict]:
     """Fetch recent tweets for one account. Returns tweets, newest first.
-    Raises AuthError if the session appears invalid (cookies expired)."""
+    Raises AuthError for invalid sessions and SourceReadError for account failures."""
     try:
         return asyncio.get_event_loop().run_until_complete(_fetch_async(handle))
     except AuthError:
+        raise
+    except SourceReadError:
         raise
     except Exception as exc:
         log.error("fetch_source failed for @%s: %s", handle, exc)
