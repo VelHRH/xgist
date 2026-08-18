@@ -1585,6 +1585,12 @@ function controlKeyboard(idsStr, spoilerOn = false) {
   ] };
 }
 
+async function recordFirstPublish(env, chatId, user) {
+  if (!user.setup || user.setup.first_publish_at) return;
+  setSetupTimestamp(user, "first_publish_at");
+  await saveUser(env, chatId, user);
+}
+
 async function publishPreview(env, chatId, controlId, idsStr, user) {
   const ids = idsStr.split(",").map(Number).sort((a, b) => a - b);
   const result = await tg(env, "copyMessages", {
@@ -1596,15 +1602,12 @@ async function publishPreview(env, chatId, controlId, idsStr, user) {
       "The Preview is still available.");
     return false;
   }
+  await recordFirstPublish(env, chatId, user);
   const dest = typeof user.channel === "string" ? user.channel : "your channel";
   await tg(env, "editMessageText", {
     chat_id: chatId, message_id: controlId, text: `✅ Posted to ${dest}`,
   });
   await recordFeedback(env, chatId, idsStr, "approved");
-  if (user.setup) {
-    setSetupTimestamp(user, "first_publish_at");
-    await saveUser(env, chatId, user);
-  }
   return true;
 }
 
@@ -2079,16 +2082,13 @@ async function publishScheduled(env) {
         chat_id: user.channel, from_chat_id: job.chat, message_ids: ids,
       });
       if (result?.ok) {
+        await recordFirstPublish(env, job.chat, user);
         const dest = typeof user.channel === "string" ? user.channel : "your channel";
         await tg(env, "editMessageText", {
           chat_id: job.chat, message_id: job.control,
           text: `✅ Posted to ${dest} (scheduled)`,
         });
         await recordFeedback(env, job.chat, job.ids, "approved");
-        if (user.setup) {
-          setSetupTimestamp(user, "first_publish_at");
-          await saveUser(env, job.chat, user);
-        }
       } else {
         await tg(env, "editMessageText", {
           chat_id: job.chat, message_id: job.control,

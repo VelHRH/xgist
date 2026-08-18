@@ -1304,6 +1304,11 @@ test("a successful Scheduled publish records the first-publish milestone once", 
         chat: 441, control: 1, ids: "40", tz: "Europe/Kyiv", hour: dueHour,
       }),
     },
+    telegramResults: {
+      editMessageText: () => {
+        throw new Error("control update failed");
+      },
+    },
   });
 
   await sendScheduledAt(harness, now);
@@ -1350,6 +1355,24 @@ test("posting to a verified channel answers before publishing", async () => {
 
   assert.deepEqual(harness.telegram.map(({ method }) => method),
     ["answerCallbackQuery", "copyMessages", "editMessageText"]);
+});
+
+test("a successful publish records its milestone before the control update", async () => {
+  const harness = createHarness({
+    users: {
+      504: activatedUser({
+        channel: "@verified", channel_verified: { id: "@verified" },
+      }),
+    },
+    telegramResults: {
+      editMessageText: () => {
+        throw new Error("control update failed");
+      },
+    },
+  });
+
+  await sendUpdate(harness, callback(504, "p:30"));
+  assert.ok(harness.user(504).setup.first_publish_at);
 });
 
 test("channel verification gives permission-specific repairs and retries", async () => {
