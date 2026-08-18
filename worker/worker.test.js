@@ -262,6 +262,35 @@ function activatedUser(overrides = {}) {
   };
 }
 
+async function addAccount(harness, id, input, overrides = {}) {
+  await sendUpdate(harness, message(id, "/add"), overrides);
+  await sendUpdate(harness, message(id, input), overrides);
+}
+
+async function chooseTimezone(harness, id, input, overrides = {}) {
+  await sendUpdate(harness, message(id, "/timezone"), overrides);
+  await sendUpdate(harness, callback(id, "timezone:retry"), overrides);
+  await sendUpdate(harness, message(id, input), overrides);
+}
+
+async function chooseSchedule(harness, id, hours, overrides = {}) {
+  await sendUpdate(harness, message(id, "/schedule"), overrides);
+  const current = new Set(harness.user(id)?.setup?.digest_time_choices || []);
+  const target = new Set(hours);
+  for (const hour of [...new Set([...current, ...target])]) {
+    if (current.has(hour) !== target.has(hour)) {
+      await sendUpdate(harness, callback(id, `digest-time:pick:${hour}`), overrides);
+    }
+  }
+  await sendUpdate(harness, callback(id, "digest-time:done"), overrides);
+}
+
+async function connectChannel(harness, id, channel, overrides = {}) {
+  await sendUpdate(harness, message(id, "/channel"), overrides);
+  await sendUpdate(harness, callback(id, "channel:connect"), overrides);
+  await sendUpdate(harness, message(id, channel), overrides);
+}
+
 function sentTo(harness, id) {
   return harness.telegram
     .filter(({ method, params }) => method === "sendMessage" && params.chat_id === id)
@@ -288,42 +317,28 @@ test("free access keeps the existing limits and upgrade action", async () => {
     users: { 102: { sources: ["a", "b", "c", "d", "e"], hours: [9] } },
   });
   await sendUpdate(harness, message(102, "/start"));
-  await sendUpdate(harness, message(102, "/add f"));
+  await addAccount(harness, 102, "f");
   await sendUpdate(harness, message(102, "/schedule 9,18"));
   await sendUpdate(harness, message(102, "/settings"));
 
   const replies = sentTo(harness, 102);
   assert.match(replies[0], /^🆓 <b>XGist Free<\/b>/);
-  assert.match(replies[1], /includes 5 watched accounts/);
-  assert.match(replies[2], /up to 1 digest time\(s\) per day/);
-  assert.match(replies[3], /🆓 <b>XGist Free<\/b>/);
-  assert.match(replies[3], /Upgrade with \/pro/);
+  assert.match(replies[1], /Send the X account/);
+  assert.match(replies[2], /includes 5 watched accounts/);
+  assert.match(replies[3], /Free plan includes exactly one/);
+  assert.match(replies[4], /🆓 <b>XGist Free<\/b>/);
+  assert.match(replies[4], /Upgrade with \/pro/);
 });
 
-test("help opens concise topics and every topic answers its callback", async () => {
-  const promo = Array.from({ length: 50 }, (_, index) => `promo-${index}`);
-  const harness = createHarness({ promo });
+test("setup and help commands have no response", async () => {
+  const original = activatedUser();
+  const harness = createHarness({ users: { 110: original } });
+
+  await sendUpdate(harness, message(110, "/setup"));
   await sendUpdate(harness, message(110, "/help"));
 
-  const menu = harness.telegram.find(({ method }) => method === "sendMessage");
-  assert.match(menu.params.text, /Choose a topic/);
-  assert.deepEqual(menu.params.reply_markup.inline_keyboard.flat().map(({ text }) => text), [
-    "Setup", "Accounts and briefings", "Publishing", "Preview editing", "Free versus Pro",
-  ]);
-
-  const topics = [
-    ["setup", /Guided setup/],
-    ["briefings", /Watched accounts and briefings/],
-    ["publishing", /Publishing channel is optional/],
-    ["preview", /Preview editing/],
-    ["plans", /Free versus Pro/],
-  ];
-  for (const [topic, expected] of topics) {
-    const before = harness.telegram.length;
-    await sendUpdate(harness, callback(110, `help:topic:${topic}`));
-    assert.equal(harness.telegram[before].method, "answerCallbackQuery");
-    assert.match(sentTo(harness, 110).at(-1), expected);
-  }
+  assert.equal(harness.telegram.length, 0);
+  assert.deepEqual(harness.user(110), original);
 });
 
 test("activated start shows plan-aware configured value while unactivated start resumes setup", async () => {
@@ -369,32 +384,101 @@ test("activated start shows plan-aware configured value while unactivated start 
   assert.equal(legacy.user(125).timezone, legacyConfig.timezone);
 });
 
-test("setup shows saved configuration and safe edit actions without resetting it", async () => {
+test("settings shows saved configuration and safe edit actions without resetting it", async () => {
   const original = activatedUser({ language: "uk", style: "quiet", limit: 3 });
   const harness = createHarness({ users: { 123: original } });
-  await sendUpdate(harness, message(123, "/setup"));
+  await sendUpdate(harness, message(123, "/settings"));
 
-  const setup = harness.telegram.find(({ method }) => method === "sendMessage");
-  assert.match(setup.params.text, /Current setup/);
-  assert.match(setup.params.text, /Watched accounts:.*naval.*pmarca/);
-  assert.match(setup.params.text, /Timezone: Europe\/Kyiv/);
-  assert.match(setup.params.text, /Active Digest times: 09:00/);
-  assert.match(setup.params.text, /Retained Digest times: 18:00/);
-  assert.match(setup.params.text, /Publishing channel: @briefings/);
-  assert.match(setup.params.text, /Maximum: 5 Watched accounts · 1 Digest time\/day/);
-  assert.deepEqual(setup.params.reply_markup.inline_keyboard.flat().map(({ text }) => text), [
-    "Edit accounts", "Edit timezone", "Edit Digest times", "Edit channel",
+  const settings = harness.telegram.find(({ method }) => method === "sendMessage");
+  assert.match(settings.params.text, /Settings/);
+  assert.match(settings.params.text, /Watched accounts:.*naval.*pmarca/);
+  assert.match(settings.params.text, /Timezone: Europe\/Kyiv/);
+  assert.match(settings.params.text, /Active Digest times: 09:00/);
+  assert.match(settings.params.text, /Retained Digest times: 18:00/);
+  assert.match(settings.params.text, /Publishing channel: @briefings/);
+  assert.match(settings.params.text, /Language: Ukrainian/);
+  assert.match(settings.params.text, /Style: quiet/);
+  assert.match(settings.params.text, /Posts per digest: 3/);
+  assert.match(settings.params.text, /Maximum: 5 Watched accounts · 1 Digest time\/day/);
+  assert.deepEqual(settings.params.reply_markup.inline_keyboard.flat().map(({ text }) => text), [
+    "Accounts", "Digest schedule", "Timezone", "Publishing channel",
+    "Language", "Caption style", "Posts per Digest",
+    "⏸ Pause digests",
   ]);
   assert.deepEqual(harness.user(123), original);
 
-  for (const action of ["accounts", "timezone", "times", "channel"]) {
+  const actions = {
+    accounts: /Watched accounts/,
+    timezone: /Timezone/,
+    times: /Digest schedule/,
+    channel: /Publishing channel/,
+    language: /Post language/,
+    style: /Caption style/,
+    limit: /Posts per Digest/,
+  };
+  for (const [action, expected] of Object.entries(actions)) {
     const before = harness.telegram.length;
     await sendUpdate(harness, callback(123, `setup:edit:${action}`));
     assert.equal(harness.telegram[before].method, "answerCallbackQuery");
-    assert.deepEqual(harness.user(123), original);
+    assert.match(sentTo(harness, 123).at(-1), expected);
   }
   assert.equal(harness.user(123).language, "uk");
-  assert.match(sentTo(harness, 123).at(-1), /Publishing channel/);
+});
+
+test("interactive settings replace command parameters and support tile selections", async () => {
+  const original = activatedUser({ sources: ["naval", "pmarca", "sama"], style: "quiet", limit: 3 });
+  const harness = createHarness({ users: { 128: original } });
+
+  await sendUpdate(harness, message(128, "/lang ru"));
+  assert.equal(harness.user(128).language, "en");
+  await sendUpdate(harness, callback(128, "language:pick:uk"));
+  assert.equal(harness.user(128).language, "uk");
+
+  await sendUpdate(harness, message(128, "/limit 5"));
+  assert.equal(harness.user(128).limit, 3);
+  await sendUpdate(harness, callback(128, "limit:pick:5"));
+  assert.equal(harness.user(128).limit, 5);
+
+  await sendUpdate(harness, message(128, "/post_style terse"));
+  assert.equal(harness.user(128).style, "quiet");
+  await sendUpdate(harness, callback(128, "style:custom"));
+  await sendUpdate(harness, message(128, "Short, factual, no emoji"));
+  assert.equal(harness.user(128).style, "Short, factual, no emoji");
+
+  await sendUpdate(harness, message(128, "/timezone London"));
+  assert.equal(harness.user(128).timezone, "Europe/Kyiv");
+  assert.equal(harness.user(128).setup.timezone_candidate, "Europe/Kyiv");
+
+  await sendUpdate(harness, message(128, "/channel @ignored"));
+  assert.equal(harness.user(128).channel, "@briefings");
+  assert.equal(harness.telegram.some(({ method }) => method === "getChatMember"), false);
+  await sendUpdate(harness, callback(128, "channel:disconnect"));
+  assert.equal(harness.user(128).channel, null);
+  assert.equal(harness.user(128).channel_verified, undefined);
+});
+
+test("account commands prompt for input and remove multiple accounts with tiles", async () => {
+  const harness = createHarness({
+    users: { 129: activatedUser({ sources: ["naval", "pmarca", "sama"] }) },
+  });
+
+  await sendUpdate(harness, message(129, "/add @ignored"));
+  assert.equal(harness.github.length, 0);
+  assert.equal(harness.user(129).settings_input, "account");
+  await sendUpdate(harness, message(129, "newaccount"));
+  assert.equal(harness.user(129).account_validation.handle, "newaccount");
+  assert.equal(harness.user(129).settings_input, undefined);
+
+  await sendUpdate(harness, message(129, "/remove @ignored"));
+  assert.deepEqual(harness.user(129).sources, ["naval", "pmarca", "sama"]);
+  await sendUpdate(harness, callback(129, "account:remove:pick:0"));
+  await sendUpdate(harness, callback(129, "account:remove:pick:2"));
+  assert.deepEqual(harness.user(129).account_removal_choices, ["naval", "sama"]);
+  await sendUpdate(harness, callback(129, "account:remove:done"));
+  assert.deepEqual(harness.user(129).sources, ["pmarca"]);
+  assert.equal(harness.user(129).account_removal_choices, undefined);
+  const result = harness.telegram.findLast(({ method }) => method === "editMessageText");
+  assert.match(result.params.text, /Removed 2 Watched accounts/);
 });
 
 test("setup reminders honor the 24-hour boundary and move with new activity", async () => {
@@ -544,21 +628,22 @@ test("registered and hidden power-user commands remain available", async () => {
   const registered = harness.telegram.find(({ method }) => method === "setMyCommands")
     .params.commands.map(({ command }) => command);
   for (const command of [
-    "start", "setup", "channel", "add", "schedule", "lang", "post_style", "list",
-    "remove", "limit", "timezone", "settings", "pro", "feedback", "help",
+    "start", "channel", "add", "schedule", "lang", "post_style", "list",
+    "remove", "limit", "timezone", "settings", "pro", "feedback",
   ]) {
     assert.ok(registered.includes(command), command);
   }
+  assert.ok(!registered.includes("setup"));
+  assert.ok(!registered.includes("help"));
 
   await sendUpdate(harness, message(124, "/language uk"));
   await sendUpdate(harness, message(124, "/style concise"));
   await sendUpdate(harness, message(124, "/interests technology"));
   await sendUpdate(harness, message(124, "/times 7"));
-  assert.equal(harness.user(124).language, "uk");
-  assert.equal(harness.user(124).style, "concise");
+  assert.equal(harness.user(124).language, "en");
+  assert.equal(harness.user(124).style, undefined);
   assert.equal(harness.user(124).interests, "technology");
-  assert.deepEqual(harness.user(124).hours, [7, 18]);
-  assert.deepEqual(harness.user(124).free_active_hours, [7]);
+  assert.deepEqual(harness.user(124).hours, [9, 18]);
 });
 
 test("a pasted status link dispatches a thread Preview and enforces the Free quota", async () => {
@@ -652,14 +737,14 @@ test("settings pause and resume preserve the rest of the user configuration", as
 
   const settings = harness.telegram.find(({ method }) => method === "sendMessage");
   assert.match(settings.params.text, /Digest: Active/);
-  assert.equal(settings.params.reply_markup.inline_keyboard[0][0].text,
+  assert.equal(settings.params.reply_markup.inline_keyboard.at(-1)[0].text,
     "⏸ Pause digests");
 
   await sendUpdate(harness, callback(115, "pt"));
   assert.deepEqual(harness.user(115), { ...original, paused: true });
   const paused = harness.telegram.findLast(({ method }) => method === "editMessageText");
   assert.match(paused.params.text, /Digest: Paused/);
-  assert.equal(paused.params.reply_markup.inline_keyboard[0][0].text,
+  assert.equal(paused.params.reply_markup.inline_keyboard.at(-1)[0].text,
     "▶️ Resume digests");
 
   await sendUpdate(harness, callback(115, "pt"));
@@ -669,17 +754,19 @@ test("settings pause and resume preserve the rest of the user configuration", as
 test("paid access is labeled honestly and keeps Pro limits", async () => {
   const paidUntil = new Date(Date.now() + 20 * DAY).toISOString();
   const harness = createHarness({
-    users: { 103: { sources: [], hours: [9], pro_source: "paid", paid_until: paidUntil } },
+    users: { 103: activatedUser({
+      hours: [9], pro_source: "paid", paid_until: paidUntil,
+    }) },
   });
-  await sendUpdate(harness, message(103, "/schedule 1,2,3,4,5,6"));
+  await chooseSchedule(harness, 103, [1, 2, 3, 4, 5, 6]);
   await sendUpdate(harness, message(103, "/pro"));
 
   const replies = sentTo(harness, 103);
-  assert.match(replies[0], /01:00, 02:00, 03:00, 04:00, 05:00, 06:00/);
-  assert.match(replies[1], /^⭐ <b>XGist Pro<\/b>/);
-  assert.match(replies[1], new RegExp(paidUntil.slice(0, 10)));
-  assert.match(replies[1], /Telegram Settings → My Stars/);
-  assert.match(replies[1], /review your Pro setup with \/settings/);
+  assert.match(replies.at(-2), /Digest times updated: 01:00, 02:00, 03:00, 04:00, 05:00, 06:00/);
+  assert.match(replies.at(-1), /^⭐ <b>XGist Pro<\/b>/);
+  assert.match(replies.at(-1), new RegExp(paidUntil.slice(0, 10)));
+  assert.match(replies.at(-1), /Telegram Settings → My Stars/);
+  assert.match(replies.at(-1), /review your Pro setup with \/settings/);
 });
 
 test("legacy promotional users retain a trial identity", async () => {
@@ -702,12 +789,13 @@ test("courtesy and administrator access have distinct identities and Pro limits"
   assert.match(sentTo(courtesy, 105)[0], /25 watched accounts/);
   assert.match(sentTo(courtesy, 105)[1], /XGist Pro · Courtesy access/);
 
-  const administrator = createHarness({ users: { 106: { sources: [], hours: [9] } } });
-  await sendUpdate(administrator, message(106, "/schedule 1,2,3,4,5,6"),
-    { ADMIN_ID: "106" });
+  const administrator = createHarness({
+    users: { 106: activatedUser({ hours: [9] }) },
+  });
+  await chooseSchedule(administrator, 106, [1, 2, 3, 4, 5, 6], { ADMIN_ID: "106" });
   await sendUpdate(administrator, message(106, "/pro"), { ADMIN_ID: "106" });
-  assert.match(sentTo(administrator, 106)[0], /01:00, 02:00, 03:00, 04:00, 05:00, 06:00/);
-  assert.match(sentTo(administrator, 106)[1], /XGist Pro · Administrator/);
+  assert.match(sentTo(administrator, 106).at(-2), /01:00, 02:00, 03:00, 04:00, 05:00, 06:00/);
+  assert.match(sentTo(administrator, 106).at(-1), /XGist Pro · Administrator/);
 });
 
 test("paid access changes to Free exactly at the expiry boundary", async () => {
@@ -951,7 +1039,7 @@ test("accepted handle forms dispatch canonical validation and save only after su
     const harness = createHarness({
       promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
     });
-    await sendUpdate(harness, message(id, `/add ${input}`));
+    await addAccount(harness, id, input);
     assert.deepEqual(harness.github[0].inputs, {
       account_handle: "naval", only_user: String(id),
     });
@@ -971,7 +1059,7 @@ test("accepted handle forms dispatch canonical validation and save only after su
 test("Guided setup rejects malformed input before validation", async () => {
   const harness = createHarness();
   await sendUpdate(harness, message(220, "/start"));
-  await sendUpdate(harness, message(220, "/add https://x.com/naval/status/123"));
+  await addAccount(harness, 220, "https://x.com/naval/status/123");
 
   assert.equal(harness.github.length, 0);
   assert.deepEqual(harness.user(220).sources, []);
@@ -988,7 +1076,7 @@ test("validation outcomes are distinct, recoverable, and never save an unreadabl
   let id = 230;
   for (const [outcome, expected] of outcomes) {
     const harness = createHarness();
-    await sendUpdate(harness, message(id, "/add sample"));
+    await addAccount(harness, id, "sample");
     await sendUpdate(harness, accountValidation(id, "sample", outcome));
 
     assert.deepEqual(harness.user(id).sources, []);
@@ -1108,17 +1196,17 @@ test("duplicate accounts and plan limits do not dispatch validation", async () =
     promo,
     users: { 240: { sources: ["naval"], hours: [9] } },
   });
-  await sendUpdate(duplicate, message(240, "/add @NAVAL"));
+  await addAccount(duplicate, 240, "@NAVAL");
   assert.equal(duplicate.github.length, 0);
-  assert.match(sentTo(duplicate, 240)[0], /already in your Watched accounts/);
+  assert.match(sentTo(duplicate, 240).at(-1), /already in your Watched accounts/);
 
   const limited = createHarness({
     promo,
     users: { 241: { sources: ["a", "b", "c", "d", "e"], hours: [9] } },
   });
-  await sendUpdate(limited, message(241, "/add sixth"));
+  await addAccount(limited, 241, "sixth");
   assert.equal(limited.github.length, 0);
-  assert.match(sentTo(limited, 241)[0], /includes 5 watched accounts/);
+  assert.match(sentTo(limited, 241).at(-1), /includes 5 watched accounts/);
 });
 
 test("plain setup input and the add command share validation progress", async () => {
@@ -1127,7 +1215,7 @@ test("plain setup input and the add command share validation progress", async ()
   await sendUpdate(plain, message(250, "@Naval"));
 
   const command = createHarness();
-  await sendUpdate(command, message(251, "/add @Naval"));
+  await addAccount(command, 251, "@Naval");
 
   assert.equal(plain.user(250).account_validation.handle, "naval");
   assert.equal(command.user(251).account_validation.handle, "naval");
@@ -1179,8 +1267,9 @@ test("city and IANA input resolve to a confirmation without saving early", async
       },
     },
   });
-  await sendUpdateAt(iana, message(302, "/timezone America/North_Dakota/Center"),
-    winter);
+  await sendUpdateAt(iana, message(302, "/timezone"), winter);
+  await sendUpdateAt(iana, callback(302, "timezone:retry"), winter);
+  await sendUpdateAt(iana, message(302, "America/North_Dakota/Center"), winter);
   assert.equal(iana.user(302).setup.timezone_candidate,
     "America/North_Dakota/Center");
   assert.equal(iana.user(302).timezone, null);
@@ -1222,7 +1311,7 @@ test("only explicit confirmation completes the timezone prerequisite", async () 
       },
     },
   });
-  await sendUpdateAt(harness, message(320, "/timezone Europe/Kyiv"), now);
+  await sendUpdateAt(harness, message(320, "/timezone"), now);
   assert.equal(harness.user(320).timezone, null);
   assert.equal(harness.user(320).setup.timezone_confirmed_at, undefined);
   assert.match(sentTo(harness, 320)[0], /15:00/);
@@ -1263,13 +1352,14 @@ test("invalid timezone input stays recoverably on step 2", async () => {
       },
     },
   });
-  await sendUpdate(harness, message(330, "/timezone Middle of nowhere"));
+  await chooseTimezone(harness, 330, "Middle of nowhere");
 
   assert.equal(harness.user(330).timezone, null);
   assert.equal(harness.user(330).setup.current_step, "timezone");
-  assert.equal(harness.user(330).setup.choosing_timezone, true);
-  assert.match(sentTo(harness, 330)[0], /couldn’t resolve/);
-  assert.match(sentTo(harness, 330)[0], /Europe\/Kyiv/);
+  assert.equal(harness.user(330).setup.choosing_timezone, false);
+  assert.equal(harness.user(330).setup.timezone_candidate, "Europe/Kyiv");
+  assert.match(sentTo(harness, 330).at(-1), /couldn’t identify/);
+  assert.match(sentTo(harness, 330).at(-1), /Europe\/Kyiv/);
 });
 
 test("start resumes a pending timezone confirmation", async () => {
@@ -1306,7 +1396,7 @@ test("timezone changes preserve local Digest hours and share command progress", 
       },
     },
   });
-  await sendUpdate(harness, message(350, "/timezone London"));
+  await chooseTimezone(harness, 350, "London");
   assert.equal(harness.user(350).timezone, "America/New_York");
   assert.equal(harness.user(350).setup.current_step, "timezone");
 
@@ -1328,14 +1418,14 @@ test("direct timezone confirmation preserves the actual required setup step", as
       },
     },
   });
-  await sendUpdate(harness, message(360, "/timezone Kyiv"));
+  await sendUpdate(harness, message(360, "/timezone"));
   await sendUpdate(harness, callback(360, "timezone:confirm"));
 
   assert.equal(harness.user(360).timezone, "Europe/Kyiv");
   assert.equal(harness.user(360).setup.current_step, "account");
-  assert.match(sentTo(harness, 360).at(-1), /adding a Watched account/);
+  assert.match(sentTo(harness, 360).at(-1), /Continue Guided setup with \/add/);
 
-  await sendUpdate(harness, message(360, "/add naval"));
+  await addAccount(harness, 360, "naval");
   await sendUpdate(harness, accountValidation(360, "naval", "readable"));
   assert.equal(harness.user(360).setup.current_step, "digest_time");
 });
@@ -1352,14 +1442,19 @@ test("Free Guided setup shows all hours and activates on exactly one explicit ch
   assert.match(prompt.params.text, /Guided setup · Step 3 of 3/);
   assert.match(prompt.params.text, /Free plan includes exactly one/);
   assert.match(prompt.params.text, /within a few minutes after the selected hour/);
-  assert.equal(prompt.params.reply_markup.inline_keyboard.length, 6);
-  assert.ok(prompt.params.reply_markup.inline_keyboard.every((row) => row.length === 4));
-  assert.equal(prompt.params.reply_markup.inline_keyboard.flat().length, 24);
-  assert.ok(prompt.params.reply_markup.inline_keyboard.flat()
+  assert.equal(prompt.params.reply_markup.inline_keyboard.length, 7);
+  assert.ok(prompt.params.reply_markup.inline_keyboard.slice(0, 6)
+    .every((row) => row.length === 4));
+  assert.equal(prompt.params.reply_markup.inline_keyboard.flat().length, 25);
+  assert.ok(prompt.params.reply_markup.inline_keyboard.slice(0, 6).flat()
     .every(({ text }) => !text.startsWith("✓")));
+  assert.equal(prompt.params.reply_markup.inline_keyboard.at(-1)[0].text, "Done");
   assert.equal(harness.user(401).setup.digest_time_confirmed_at, undefined);
 
   await sendUpdate(harness, callback(401, "digest-time:pick:14"));
+  assert.deepEqual(harness.user(401).setup.digest_time_choices, [14]);
+  assert.deepEqual(harness.user(401).hours, [9]);
+  await sendUpdate(harness, callback(401, "digest-time:done"));
   const user = harness.user(401);
   assert.deepEqual(user.hours, [14]);
   assert.ok(user.setup.digest_time_confirmed_at);
@@ -1440,15 +1535,15 @@ test("schedule completes the same activation prerequisite when earlier steps are
     users: { 420: readyForDigestTime() },
     promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
   });
-  await sendUpdate(harness, message(420, "/schedule 18"));
+  await chooseSchedule(harness, 420, [18]);
 
   assert.deepEqual(harness.user(420).hours, [18]);
   assert.ok(harness.user(420).setup.digest_time_confirmed_at);
   assert.ok(harness.user(420).setup.completed_at);
-  assert.match(sentTo(harness, 420)[0], /Setup complete · XGist Free/);
+  assert.match(sentTo(harness, 420).at(-1), /Setup complete · XGist Free/);
 
   const completedAt = harness.user(420).setup.completed_at;
-  await sendUpdate(harness, message(420, "/schedule 7"));
+  await chooseSchedule(harness, 420, [7]);
   assert.deepEqual(harness.user(420).hours, [7]);
   assert.equal(harness.user(420).setup.completed_at, completedAt);
   assert.match(sentTo(harness, 420).at(-1), /Digest times updated: 07:00/);
@@ -1460,7 +1555,7 @@ test("skipping the optional Publishing channel is a successful terminal path", a
     users: { 430: readyForDigestTime() },
     promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
   });
-  await sendUpdate(harness, message(430, "/schedule 8"));
+  await chooseSchedule(harness, 430, [8]);
   const completedAt = harness.user(430).setup.completed_at;
   await sendUpdate(harness, callback(430, "setup:skip-channel"));
 
@@ -1485,12 +1580,17 @@ test("activation funnel milestones are recorded once through first publish", asy
 
   await sendUpdateAt(harness, message(440, "/start"), base);
   const startedAt = harness.user(440).setup.started_at;
-  await sendUpdateAt(harness, message(440, "/add naval"), base + 1);
+  await sendUpdateAt(harness, message(440, "/add"), base + 1);
+  await sendUpdateAt(harness, message(440, "naval"), base + 1);
   await sendUpdateAt(harness, accountValidation(440, "naval", "readable"), base + 2);
-  await sendUpdateAt(harness, message(440, "/timezone Europe/Kyiv"), base + 3);
+  await sendUpdateAt(harness, message(440, "/timezone"), base + 3);
   await sendUpdateAt(harness, callback(440, "timezone:confirm"), base + 4);
-  await sendUpdateAt(harness, message(440, "/schedule 8"), base + 5);
-  await sendUpdateAt(harness, message(440, "/channel @firstchannel"), base + 6);
+  await sendUpdateAt(harness, message(440, "/schedule"), base + 5);
+  await sendUpdateAt(harness, callback(440, "digest-time:pick:8"), base + 5);
+  await sendUpdateAt(harness, callback(440, "digest-time:done"), base + 5);
+  await sendUpdateAt(harness, message(440, "/channel"), base + 6);
+  await sendUpdateAt(harness, callback(440, "channel:connect"), base + 6);
+  await sendUpdateAt(harness, message(440, "@firstchannel"), base + 6);
   await sendUpdateAt(harness, callback(440, "p:30"), base + 7);
 
   const first = harness.user(440).setup;
@@ -1512,10 +1612,16 @@ test("activation funnel milestones are recorded once through first publish", asy
     channel_connected_at: first.channel_connected_at,
     first_publish_at: first.first_publish_at,
   };
-  await sendUpdateAt(harness, message(440, "/timezone London"), base + 8);
+  await sendUpdateAt(harness, message(440, "/timezone"), base + 8);
+  await sendUpdateAt(harness, callback(440, "timezone:retry"), base + 8);
+  await sendUpdateAt(harness, message(440, "London"), base + 8);
   await sendUpdateAt(harness, callback(440, "timezone:confirm"), base + 9);
-  await sendUpdateAt(harness, message(440, "/schedule 9"), base + 10);
-  await sendUpdateAt(harness, message(440, "/channel @secondchannel"), base + 11);
+  await sendUpdateAt(harness, message(440, "/schedule"), base + 10);
+  await sendUpdateAt(harness, callback(440, "digest-time:pick:9"), base + 10);
+  await sendUpdateAt(harness, callback(440, "digest-time:done"), base + 10);
+  await sendUpdateAt(harness, message(440, "/channel"), base + 11);
+  await sendUpdateAt(harness, callback(440, "channel:connect"), base + 11);
+  await sendUpdateAt(harness, message(440, "@secondchannel"), base + 11);
   await sendUpdateAt(harness, callback(440, "p:30"), base + 12);
   for (const [field, value] of Object.entries(milestones)) {
     assert.equal(harness.user(440).setup[field], value, field);
@@ -1555,16 +1661,16 @@ test("a successful Scheduled publish records the first-publish milestone once", 
 
 test("public and forwarded private Publishing channels are verified before saving", async () => {
   const publicChannel = createHarness({ users: { 501: { channel: null } } });
-  await sendUpdate(publicChannel, message(501, "/channel @publicchannel"));
+  await connectChannel(publicChannel, 501, "@publicchannel");
 
   assert.equal(publicChannel.user(501).channel, "@publicchannel");
   assert.equal(publicChannel.user(501).channel_verified.id, "@publicchannel");
   assert.equal(publicChannel.user(501).channel_candidate, undefined);
-  assert.deepEqual(publicChannel.telegram.map(({ method }) => method),
-    ["getMe", "getChatMember", "sendMessage"]);
-  assert.deepEqual(publicChannel.telegram[1].params,
+  const publicMembership = publicChannel.telegram.find(({ method }) =>
+    method === "getChatMember");
+  assert.deepEqual(publicMembership.params,
     { chat_id: "@publicchannel", user_id: 999 });
-  assert.match(sentTo(publicChannel, 501)[0], /Publishing channel verified/);
+  assert.match(sentTo(publicChannel, 501).at(-1), /Publishing channel verified/);
 
   const privateChannel = createHarness({ users: { 502: { channel: null } } });
   const forwarded = message(502, "forwarded post");
@@ -1644,7 +1750,7 @@ test("channel verification gives permission-specific repairs and retries", async
         } : item.initial,
       },
     });
-    await sendUpdate(harness, message(item.id, "/channel @repairme"));
+    await connectChannel(harness, item.id, "@repairme");
 
     assert.equal(harness.user(item.id).channel, null);
     assert.equal(harness.user(item.id).channel_candidate.id, "@repairme");
@@ -1708,7 +1814,7 @@ test("Post without a channel preserves the Preview and requires final confirmati
     ["answerCallbackQuery", "sendMessage"]);
   assert.match(sentTo(harness, 520)[0], /exact Preview is saved/);
 
-  await sendUpdate(harness, message(520, "/channel @destination"));
+  await connectChannel(harness, 520, "@destination");
   assert.equal(harness.telegram.some(({ method }) => method === "copyMessages"), false);
   const confirmation = harness.telegram.find(({ method, params }) =>
     method === "editMessageReplyMarkup" && params.message_id === 1);
@@ -1734,7 +1840,7 @@ test("declining final publication restores the Preview controls", async () => {
     users: { 530: { channel: null } }, states: { 530: { pending } },
   });
   await sendUpdate(harness, callback(530, "p:20"));
-  await sendUpdate(harness, message(530, "/channel @destination"));
+  await connectChannel(harness, 530, "@destination");
   const beforeCancel = harness.telegram.length;
   await sendUpdate(harness, callback(530, "channel:not-now"));
 

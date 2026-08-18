@@ -164,15 +164,14 @@ to also get admin commands in your autocomplete).
 Open a private chat with your bot and send `/start`. Guided setup verifies each
 Watched account before saving it, confirms timezone, then activates one Free or
 up to six Pro daily Digest times.
-You can also use the setup commands directly; timezone accepts a familiar city
-or an exact IANA timezone and asks for confirmation before saving:
+You can also open each interactive setting directly. Commands do not accept
+configuration parameters; the bot shows buttons or asks for the next message:
 
 ```
-/add naval
-/times 9,18
-/timezone Kyiv
-/interests AI, startups
-/style short summaries in Ukrainian, no emoji
+/add
+/schedule
+/timezone
+/post_style
 ```
 
 A Publishing channel is optional for receiving private Previews. To enable
@@ -180,7 +179,7 @@ one-tap posting, create or choose a Telegram channel, add the bot as an
 administrator with **Post messages** permission, then send:
 
 ```
-/channel @yourchannel      (for a private channel: forward it any message from the channel)
+/channel                   (for a private channel: forward it any message when prompted)
 ```
 
 ### 10. Test it
@@ -196,11 +195,10 @@ Done. From now on it runs automatically at your configured hours.
 
 ## Bot commands
 
-Use `/start` for Guided setup or the activated home, `/setup` to review and
-edit saved configuration, and `/help` for concise setup, briefing, publishing,
-Preview-editing, and plan topics. Power-user commands remain available in the
+Use `/start` for Guided setup or the activated home and `/settings` to review
+and edit saved configuration. Power-user commands remain available in the
 autocomplete menu, including `/channel`, `/add`, `/remove`, `/list`, `/schedule`,
-`/timezone`, `/limit`, `/lang`, `/post_style`, and `/settings`.
+`/timezone`, `/limit`, `/lang`, and `/post_style`.
 
 ## How multiple users work
 
