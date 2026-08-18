@@ -1481,7 +1481,10 @@ async function settingsView(env, chatId) {
       `Maximum: ${planCapacity(plan)}`,
     paused ? "⏸ Digest: Paused" : "▶️ Digest: Active",
   ];
-  if (plan.tier === "free") lines.push(presentation.details);
+  if (plan.tier === "free") {
+    lines.push("");
+    lines.push(presentation.details);
+  }
   if (access.inactiveSources.length || access.inactiveHours.length) {
     const retained = ["🔒 Inactive Pro configuration"];
     if (access.inactiveSources.length) {
