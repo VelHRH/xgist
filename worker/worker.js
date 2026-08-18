@@ -22,32 +22,15 @@
  * POST requests are the Telegram webhook.
  */
 
-const HELP = `🤖 XGist — the gist of X, straight to your Telegram channel
+const HELP = "❓ <b>Help</b>\n\nChoose a topic. Power-user commands remain available in the / menu.";
 
-Setup — 2 steps:
-
-1️⃣ /add @naval @pmarca — X (Twitter) accounts to watch (up to 5 free · 25 with Pro)
-
-2️⃣ /schedule 9,18 — hours (0-23) when I bring you a digest (1 time/day free · 6 with Pro)
-
-Optional: /channel @yourchannel — connect a Publishing channel for one-tap posting
-(first add me as its admin with the "Post messages" permission; private channel? just forward me any message from it)
-
-At those hours you'll get previews here. Tap ✅ Post — it's in your channel. Tap ❌ Skip — nobody ever sees it. Tap ✏️ Edit to rewrite the text or swap the images before posting. Tap 🫥 Spoiler to blur the media and text. Tap 🕐 Schedule to publish at a later hour instead of right away.
-
-🧵 Post a specific thread: paste any X link here and I'll build a Preview from the whole self-reply chain — same buttons, straight to your channel (1/day free · 5 with Pro).
-
-Fine-tuning:
-🌐 /lang en | uk | ru — post language (default: en)
-✍️ /post_style short, witty, no emoji — how to write captions
-📋 /list — accounts you watch
-🗑 /remove @handle — stop watching one
-🔢 /limit 3 — max posts per digest (1-5)
-🌍 /timezone Europe/Kyiv — your timezone
-⚙️ /settings — your current setup
-🆔 /id — your Telegram id
-⭐ /pro — up to 6 digests/day and 25 accounts
-📮 /feedback — tell the maker anything`;
+const HELP_TOPICS = {
+  setup: "<b>Setup</b>\n\n/start resumes Guided setup until activation. After activation, /setup shows your saved configuration and safe edit actions.",
+  briefings: "<b>Watched accounts and briefings</b>\n\nUse /add and /remove to edit Watched accounts. Use /schedule to choose Digest times. /list shows the accounts you watch.",
+  publishing: "<b>Publishing</b>\n\nA Publishing channel is optional. Use /channel after adding me as an administrator with permission to post. Private Previews still arrive here without a channel.",
+  preview: "<b>Preview editing</b>\n\nUse ✏️ Edit to rewrite text or replace media, 🫥 Spoiler to blur content, ✅ Post to publish, ❌ Skip to discard, or 🕐 Schedule for a later Scheduled publish.",
+  plans: "<b>Free versus Pro</b>\n\n/settings shows your current plan and limits. /pro shows the Pro offer or the source and status of your active Pro access.",
+};
 
 const ADMIN_HELP = `
 
@@ -150,8 +133,7 @@ function planPresentation(plan) {
   }
   return {
     label: "🆓 <b>XGist Free</b>",
-    details: `${plan.limits.sources} watched accounts · ` +
-      `${plan.limits.hours} Digest time/day · Upgrade with /pro`,
+    details: "Upgrade with /pro",
   };
 }
 
@@ -300,6 +282,8 @@ const MENU_BUTTONS = {
 
 // Registered in Telegram's "/" autocomplete via GET /setup-commands?key=<WEBHOOK_SECRET>
 const COMMANDS = [
+  ["start", "open your home or resume setup"],
+  ["setup", "review and edit your setup"],
   ["channel", "connect your channel: @name"],
   ["add", "watch X accounts: @naval @pmarca"],
   ["schedule", "digest hours: 9,18"],
@@ -512,6 +496,10 @@ const SETUP_SKIP_CHANNEL = "setup:skip-channel";
 const CHANNEL_RETRY = "channel:retry";
 const CHANNEL_PUBLISH = "channel:publish";
 const CHANNEL_NOT_NOW = "channel:not-now";
+const NAV_SETUP = "nav:setup";
+const NAV_HELP = "nav:help";
+const SETUP_EDIT = "setup:edit:";
+const HELP_TOPIC = "help:topic:";
 const CITY_TIMEZONE_CHOICES = {
   kyiv: [{ label: "Kyiv, Ukraine", zone: "Europe/Kyiv" }],
   kiev: [{ label: "Kyiv, Ukraine", zone: "Europe/Kyiv" }],
@@ -612,6 +600,65 @@ function selectedDigestTimes(user) {
 function formatDigestTimes(hours) {
   return (hours || []).map((hour) =>
     `${String(hour).padStart(2, "0")}:00`).join(", ");
+}
+
+function planCapacity(plan) {
+  return `${plan.limits.sources} Watched accounts · ${plan.limits.hours} Digest time` +
+    `${plan.limits.hours === 1 ? "" : "s"}/day`;
+}
+
+function homeView(user, plan, firstName) {
+  const hours = formatDigestTimes(user.hours);
+  const briefings = user.hours?.length || 0;
+  const name = firstName ? `${esc(firstName)}, your` : "Your";
+  return {
+    text: `🏠 <b>${name} daily briefings</b>\n\n` +
+      `🕘 ${briefings} configured${hours ? ` · ${hours}` : ""}\n` +
+      `👀 ${user.sources?.length || 0} Watched account${user.sources?.length === 1 ? "" : "s"}\n` +
+      `🌍 Timezone: ${user.timezone ? esc(user.timezone) : "not set"}\n` +
+      `📢 Publishing channel: ${user.channel ? esc(String(user.channel)) : "not connected"}\n\n` +
+      planPresentation(plan).label,
+    reply_markup: { inline_keyboard: [[
+      { text: "⚙️ Setup", callback_data: NAV_SETUP },
+      { text: "❓ Help", callback_data: NAV_HELP },
+    ]] },
+  };
+}
+
+function helpView(isAdmin = false) {
+  return {
+    text: HELP + (isAdmin ? ADMIN_HELP : ""),
+    reply_markup: { inline_keyboard: [
+      [{ text: "Setup", callback_data: `${HELP_TOPIC}setup` }],
+      [{ text: "Accounts and briefings", callback_data: `${HELP_TOPIC}briefings` }],
+      [{ text: "Publishing", callback_data: `${HELP_TOPIC}publishing` }],
+      [{ text: "Preview editing", callback_data: `${HELP_TOPIC}preview` }],
+      [{ text: "Free versus Pro", callback_data: `${HELP_TOPIC}plans` }],
+    ] },
+  };
+}
+
+async function setupView(env, chatId) {
+  const user = (await loadUser(env, chatId)) || userDefaults();
+  const plan = await resolvePlan(env, chatId, user);
+  return {
+    text: "⚙️ <b>Current setup</b>\n\n" +
+      `👀 Watched accounts: ${user.sources?.length ? user.sources.map(xlink).join(", ") : "none"}\n` +
+      `🌍 Timezone: ${user.timezone ? esc(user.timezone) : "not set"}\n` +
+      `🕘 Digest times: ${formatDigestTimes(user.hours) || "not set"}\n` +
+      `📢 Publishing channel: ${user.channel ? esc(String(user.channel)) : "not connected"}\n\n` +
+      `${planPresentation(plan).label}\nMaximum: ${planCapacity(plan)}`,
+    reply_markup: { inline_keyboard: [
+      [
+        { text: "Edit accounts", callback_data: `${SETUP_EDIT}accounts` },
+        { text: "Edit timezone", callback_data: `${SETUP_EDIT}timezone` },
+      ],
+      [
+        { text: "Edit Digest times", callback_data: `${SETUP_EDIT}times` },
+        { text: "Edit channel", callback_data: `${SETUP_EDIT}channel` },
+      ],
+    ] },
+  };
 }
 
 function digestTimeView(user, plan) {
@@ -1038,14 +1085,14 @@ async function settingsView(env, chatId) {
   const lines = [
     "⚙️ <b>Your setup</b>",
     "",
-    `📢 Channel: ${u.channel ? esc(String(u.channel)) : "not set — /channel @yourchannel"}`,
-    `👀 Watching: ${u.sources?.length ? u.sources.map(xlink).join(", ") : "nobody — /add @naval"}`,
-    `🕘 Schedule: ${(u.hours || []).map((h) => String(h).padStart(2, "0") + ":00").join(", ")}`,
+    `📢 Publishing channel: ${u.channel ? esc(String(u.channel)) : "not set — /channel @yourchannel"}`,
+    `👀 Watched accounts: ${u.sources?.length ? u.sources.map(xlink).join(", ") : "none — /add @naval"}`,
+    `🕘 Digest times: ${formatDigestTimes(u.hours) || "not set — /schedule 9"}`,
     `🌍 Timezone: ${u.timezone ? esc(u.timezone) : "Europe/Kyiv (default)"}`,
     `🌐 Language: ${langNames[u.language || "en"]}`,
     `✍️ Style: ${u.style ? esc(u.style) : "default"}`,
     `🔢 Posts per digest: ${u.limit}`,
-    `${presentation.label}\n${presentation.details}`,
+    `${presentation.label}\n${presentation.details}\nMaximum: ${planCapacity(plan)}`,
     paused ? "⏸ Digest: Paused" : "▶️ Digest: Active",
   ];
   return {
@@ -1196,35 +1243,33 @@ async function handleMessage(msg, env, ctx) {
   const isAdmin = isAdminUser(msg.from, env);
 
   switch (cmd) {
-    case "/start":
-    case "/help": {
+    case "/start": {
       let promoGranted = false;
-      if (cmd === "/start" && !isAdmin) {
+      if (!isAdmin) {
         promoGranted = await maybeGrantPromo(env, chatId);
       }
       let user = await loadUser(env, chatId);
       const plan = await resolvePlan(env, chatId, user);
-      if (cmd === "/start" && !isAdmin && plan.tier === "free") {
+      if (!isAdmin && plan.tier === "free") {
         await registerFreeUser(env, chatId, plan);
         user = await loadUser(env, chatId);
       }
       const requiredStep = requiredSetupStep(user);
-      if (cmd === "/start" && requiredStep === "account") {
+      if (requiredStep === "account") {
         const entry = user || userDefaults();
         updateSetup(entry, { currentStep: "account" });
         await saveUser(env, chatId, entry);
         await reply(env, chatId,
           planWelcome(plan) + "\n\n" + accountStepText(plan),
           { reply_markup: MENU });
-      } else if (cmd === "/start" && requiredStep === "timezone") {
+      } else if (requiredStep === "timezone") {
         await showTimezoneStep(env, chatId, user, planWelcome(plan) + "\n\n");
-      } else if (cmd === "/start" && requiredStep === "digest_time" &&
-                 !user?.setup?.completed_at) {
+      } else if (requiredStep === "digest_time" && !user?.setup?.completed_at) {
         await showDigestTimeStep(env, chatId, user, planWelcome(plan) + "\n\n");
       } else {
-        const intro = cmd === "/start" ? planWelcome(plan) + "\n\n" : "";
-        await reply(env, chatId, intro + HELP + (isAdmin ? ADMIN_HELP : ""),
-          { reply_markup: MENU });
+        const view = homeView(user, plan, msg.from.first_name);
+        await reply(env, chatId, view.text,
+          { reply_markup: view.reply_markup });
       }
       if (promoGranted && env.ADMIN_ID) {
         await reply(env, Number(env.ADMIN_ID),
@@ -1232,6 +1277,16 @@ async function handleMessage(msg, env, ctx) {
           (msg.from.username ? ` (@${esc(msg.from.username)})` : ""));
       }
       return;
+    }
+
+    case "/help": {
+      const view = helpView(isAdmin);
+      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
+    }
+
+    case "/setup": {
+      const view = await setupView(env, chatId);
+      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
     }
 
     case "/feedback": {
@@ -1481,6 +1536,38 @@ async function handleCallback(cb, env) {
   const controlId = cb.message.message_id;
   const answer = (text, alert = false) =>
     tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text, show_alert: alert });
+
+  if (cb.data === NAV_SETUP) {
+    await answer("");
+    const view = await setupView(env, chatId);
+    return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
+  }
+
+  if (cb.data === NAV_HELP) {
+    await answer("");
+    const view = helpView(isAdminUser(cb.from, env));
+    return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
+  }
+
+  if (cb.data.startsWith(HELP_TOPIC)) {
+    await answer("");
+    const topic = HELP_TOPICS[cb.data.slice(HELP_TOPIC.length)];
+    if (topic) return reply(env, chatId, topic);
+    return;
+  }
+
+  if (cb.data.startsWith(SETUP_EDIT)) {
+    await answer("");
+    const prompts = {
+      accounts: "Use /add @handle to add a Watched account, /remove @handle to remove one, or /list to review them.",
+      timezone: "Use /timezone Kyiv or /timezone Europe/Kyiv. Your Digest times stay at the same local wall-clock hours.",
+      times: "Use /schedule 9,18 to edit your Digest times. Your other setup stays unchanged.",
+      channel: "Use /channel @yourchannel to connect or replace your optional Publishing channel.",
+    };
+    const prompt = prompts[cb.data.slice(SETUP_EDIT.length)];
+    if (prompt) return reply(env, chatId, prompt);
+    return;
+  }
 
   if (cb.data === SETUP_ADD_ACCOUNT) {
     const user = (await loadUser(env, chatId)) || userDefaults();

@@ -213,6 +213,23 @@ function readyForDigestTime(overrides = {}) {
   };
 }
 
+function activatedUser(overrides = {}) {
+  return {
+    channel: "@briefings",
+    sources: ["naval", "pmarca"],
+    hours: [9, 18],
+    timezone: "Europe/Kyiv",
+    language: "en",
+    setup: {
+      current_step: "complete",
+      timezone_confirmed_at: "2026-01-01T00:00:00.000Z",
+      digest_time_confirmed_at: "2026-01-01T00:00:00.000Z",
+      completed_at: "2026-01-01T00:00:00.000Z",
+    },
+    ...overrides,
+  };
+}
+
 function sentTo(harness, id) {
   return harness.telegram
     .filter(({ method, params }) => method === "sendMessage" && params.chat_id === id)
@@ -251,14 +268,117 @@ test("free access keeps the existing limits and upgrade action", async () => {
   assert.match(replies[3], /Upgrade with \/pro/);
 });
 
-test("help and setup hints treat the Publishing channel as optional", async () => {
+test("help opens concise topics and every topic answers its callback", async () => {
   const promo = Array.from({ length: 50 }, (_, index) => `promo-${index}`);
   const harness = createHarness({ promo });
   await sendUpdate(harness, message(110, "/help"));
 
-  const replies = sentTo(harness, 110);
-  assert.match(replies[0], /Setup — 2 steps/);
-  assert.match(replies[0], /Optional: \/channel @yourchannel/);
+  const menu = harness.telegram.find(({ method }) => method === "sendMessage");
+  assert.match(menu.params.text, /Choose a topic/);
+  assert.deepEqual(menu.params.reply_markup.inline_keyboard.flat().map(({ text }) => text), [
+    "Setup", "Accounts and briefings", "Publishing", "Preview editing", "Free versus Pro",
+  ]);
+
+  const topics = [
+    ["setup", /Guided setup/],
+    ["briefings", /Watched accounts and briefings/],
+    ["publishing", /Publishing channel is optional/],
+    ["preview", /Preview editing/],
+    ["plans", /Free versus Pro/],
+  ];
+  for (const [topic, expected] of topics) {
+    const before = harness.telegram.length;
+    await sendUpdate(harness, callback(110, `help:topic:${topic}`));
+    assert.equal(harness.telegram[before].method, "answerCallbackQuery");
+    assert.match(sentTo(harness, 110).at(-1), expected);
+  }
+});
+
+test("activated start shows plan-aware configured value while unactivated start resumes setup", async () => {
+  const promo = Array.from({ length: 50 }, (_, index) => `promo-${index}`);
+  const free = createHarness({ users: { 120: activatedUser() }, promo });
+  await sendUpdate(free, message(120, "/start"));
+
+  const freeHome = sentTo(free, 120)[0];
+  assert.match(freeHome, /^🏠 <b>Alice, your daily briefings<\/b>/);
+  assert.match(freeHome, /2 configured · 09:00, 18:00/);
+  assert.match(freeHome, /2 Watched accounts/);
+  assert.match(freeHome, /Timezone: Europe\/Kyiv/);
+  assert.match(freeHome, /Publishing channel: @briefings/);
+  assert.match(freeHome, /XGist Free/);
+  assert.doesNotMatch(freeHome, /Maximum|5 Watched accounts|Guided setup/);
+
+  const paidUntil = new Date(Date.now() + DAY).toISOString();
+  const pro = createHarness({
+    users: { 121: activatedUser({ pro_source: "paid", paid_until: paidUntil }) },
+  });
+  await sendUpdate(pro, message(121, "/start", { first_name: "Marta" }));
+  const proHome = sentTo(pro, 121)[0];
+  assert.match(proHome, /^🏠 <b>Marta, your daily briefings<\/b>/);
+  assert.match(proHome, /XGist Pro/);
+  assert.doesNotMatch(proHome, /25 Watched accounts|6 Digest times|Maximum/);
+
+  const unactivated = createHarness({ promo });
+  await sendUpdate(unactivated, message(122, "/start"));
+  assert.match(sentTo(unactivated, 122)[0], /Guided setup · Step 1 of 3/);
+  assert.doesNotMatch(sentTo(unactivated, 122)[0], /Alice/);
+});
+
+test("setup shows saved configuration and safe edit actions without resetting it", async () => {
+  const original = activatedUser({ language: "uk", style: "quiet", limit: 3 });
+  const harness = createHarness({ users: { 123: original } });
+  await sendUpdate(harness, message(123, "/setup"));
+
+  const setup = harness.telegram.find(({ method }) => method === "sendMessage");
+  assert.match(setup.params.text, /Current setup/);
+  assert.match(setup.params.text, /Watched accounts:.*naval.*pmarca/);
+  assert.match(setup.params.text, /Timezone: Europe\/Kyiv/);
+  assert.match(setup.params.text, /Digest times: 09:00, 18:00/);
+  assert.match(setup.params.text, /Publishing channel: @briefings/);
+  assert.match(setup.params.text, /Maximum: 5 Watched accounts · 1 Digest time\/day/);
+  assert.deepEqual(setup.params.reply_markup.inline_keyboard.flat().map(({ text }) => text), [
+    "Edit accounts", "Edit timezone", "Edit Digest times", "Edit channel",
+  ]);
+  assert.deepEqual(harness.user(123), original);
+
+  for (const action of ["accounts", "timezone", "times", "channel"]) {
+    const before = harness.telegram.length;
+    await sendUpdate(harness, callback(123, `setup:edit:${action}`));
+    assert.equal(harness.telegram[before].method, "answerCallbackQuery");
+    assert.deepEqual(harness.user(123), original);
+  }
+  assert.equal(harness.user(123).language, "uk");
+  assert.match(sentTo(harness, 123).at(-1), /Publishing channel/);
+});
+
+test("registered and hidden power-user commands remain available", async () => {
+  const harness = createHarness({ users: { 124: activatedUser() } });
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = harness.fetch;
+  try {
+    const response = await worker.fetch(
+      new Request("https://bot.test/setup-commands?key=secret"), env(), {});
+    assert.equal(response.status, 200);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  const registered = harness.telegram.find(({ method }) => method === "setMyCommands")
+    .params.commands.map(({ command }) => command);
+  for (const command of [
+    "start", "setup", "channel", "add", "schedule", "lang", "post_style", "list",
+    "remove", "limit", "timezone", "settings", "pro", "feedback", "help",
+  ]) {
+    assert.ok(registered.includes(command), command);
+  }
+
+  await sendUpdate(harness, message(124, "/language uk"));
+  await sendUpdate(harness, message(124, "/style concise"));
+  await sendUpdate(harness, message(124, "/interests technology"));
+  await sendUpdate(harness, message(124, "/times 7"));
+  assert.equal(harness.user(124).language, "uk");
+  assert.equal(harness.user(124).style, "concise");
+  assert.equal(harness.user(124).interests, "technology");
+  assert.deepEqual(harness.user(124).hours, [7]);
 });
 
 test("a pasted status link dispatches a thread Preview and enforces the Free quota", async () => {
