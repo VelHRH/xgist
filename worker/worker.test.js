@@ -7,10 +7,11 @@ const DAY = 86400000;
 
 function createHarness({
   users = {}, states = {}, whitelist = [], promo = [], githubStatus = 204,
-  telegramResults = {},
+  telegramResults = {}, schedules = {},
 } = {}) {
   const values = new Map();
   const lists = new Map();
+  const hashes = new Map([["sched", new Map(Object.entries(schedules))]]);
   const sets = new Map([
     ["uids", new Set(Object.keys(users))],
     ["whitelist", new Set(whitelist.map(String))],
@@ -66,7 +67,13 @@ function createHarness({
     }
     if (name === "SCARD") return sets.get(key)?.size || 0;
     if (name === "SMEMBERS") return [...(sets.get(key) || [])];
-    if (name === "MGET") return args.map((item) => values.get(item) ?? null);
+    if (name === "MGET") return [key, ...args].map((item) => values.get(item) ?? null);
+    if (name === "HGETALL") {
+      return [...(hashes.get(key) || new Map()).entries()].flat();
+    }
+    if (name === "HDEL") {
+      return (hashes.get(key) || new Map()).delete(String(args[0])) ? 1 : 0;
+    }
     if (name === "RPUSH") {
       const list = lists.get(key) || [];
       list.push(...args);
@@ -173,6 +180,25 @@ async function sendUpdateAt(harness, update, now, overrides = {}) {
   try {
     await sendUpdate(harness, update, overrides);
   } finally {
+    Date.now = previousNow;
+  }
+}
+
+async function sendScheduledAt(harness, now, overrides = {}) {
+  const previousFetch = globalThis.fetch;
+  const previousNow = Date.now;
+  globalThis.fetch = harness.fetch;
+  Date.now = () => now;
+  let pending;
+  try {
+    await worker.scheduled({}, env(overrides), {
+      waitUntil(value) {
+        pending = value;
+      },
+    });
+    await pending;
+  } finally {
+    globalThis.fetch = previousFetch;
     Date.now = previousNow;
   }
 }
@@ -361,6 +387,139 @@ test("setup shows saved configuration and safe edit actions without resetting it
   }
   assert.equal(harness.user(123).language, "uk");
   assert.match(sentTo(harness, 123).at(-1), /Publishing channel/);
+});
+
+test("setup reminders honor the 24-hour boundary and move with new activity", async () => {
+  const started = Date.parse("2026-08-01T12:00:00.000Z");
+  const promo = Array.from({ length: 50 }, (_, index) => `used-${index}`);
+  const harness = createHarness({
+    users: {
+      130: {
+        setup_reminder_eligible: true,
+        sources: [], hours: [9], timezone: null,
+        setup: {
+          started_at: new Date(started).toISOString(),
+          last_activity_at: new Date(started).toISOString(),
+          current_step: "account",
+          reminder_consumed: false,
+        },
+      },
+    },
+    promo,
+  });
+
+  await sendScheduledAt(harness, started + DAY - 1);
+  assert.equal(sentTo(harness, 130).length, 0);
+
+  await sendUpdateAt(harness, message(130, "/start"), started + DAY - 1);
+  harness.telegram.length = 0;
+  await sendScheduledAt(harness, started + DAY);
+  assert.equal(sentTo(harness, 130).length, 0);
+
+  const resetAt = Date.parse(harness.user(130).setup.last_activity_at);
+  await sendScheduledAt(harness, resetAt + DAY);
+  assert.equal(sentTo(harness, 130).length, 1);
+  assert.match(sentTo(harness, 130)[0], /XGist Free setup reminder/);
+  assert.match(sentTo(harness, 130)[0], /Guided setup · Step 1 of 3/);
+  assert.equal(harness.user(130).setup.abandonment_step, "account");
+  assert.ok(harness.user(130).setup.reminder_delivered_at);
+});
+
+test("setup reminders resume the exact missing step with plan-aware controls", async () => {
+  const now = Date.parse("2026-08-03T12:00:00.000Z");
+  const stale = new Date(now - DAY).toISOString();
+  const paidUntil = new Date(now + 10 * DAY).toISOString();
+  const harness = createHarness({
+    users: {
+      131: {
+        setup_reminder_eligible: true, sources: [], hours: [9], timezone: null,
+        setup: { started_at: stale, last_activity_at: stale, reminder_consumed: false },
+      },
+      132: {
+        setup_reminder_eligible: true, sources: ["naval"], hours: [9], timezone: null,
+        setup: { started_at: stale, last_activity_at: stale, reminder_consumed: false },
+      },
+      133: {
+        setup_reminder_eligible: true, sources: ["naval"], hours: [9],
+        timezone: "Europe/Kyiv", paid_until: paidUntil, pro_source: "paid",
+        setup: {
+          started_at: stale, last_activity_at: stale, reminder_consumed: false,
+          timezone_confirmed_at: stale,
+        },
+      },
+    },
+  });
+
+  await sendScheduledAt(harness, now);
+
+  assert.match(sentTo(harness, 131)[0], /XGist Free setup reminder/);
+  assert.match(sentTo(harness, 131)[0], /Step 1 of 3/);
+  assert.match(sentTo(harness, 132)[0], /Step 2 of 3/);
+  assert.match(sentTo(harness, 133)[0], /XGist Pro setup reminder/);
+  assert.match(sentTo(harness, 133)[0], /Step 3 of 3/);
+  const digestReminder = harness.telegram.find(({ method, params }) =>
+    method === "sendMessage" && params.chat_id === 133);
+  assert.equal(digestReminder.params.reply_markup.inline_keyboard.flat().at(-1).text, "Done");
+  assert.equal(harness.user(131).setup.abandonment_step, "account");
+  assert.equal(harness.user(132).setup.abandonment_step, "timezone");
+  assert.equal(harness.user(133).setup.abandonment_step, "digest_time");
+});
+
+test("a failed reminder is consumed once and later activity records recovery", async () => {
+  const now = Date.parse("2026-08-05T12:00:00.000Z");
+  const stale = new Date(now - DAY).toISOString();
+  const harness = createHarness({
+    users: {
+      134: {
+        setup_reminder_eligible: true, sources: [], hours: [9], timezone: null,
+        setup: { started_at: stale, last_activity_at: stale, reminder_consumed: false },
+      },
+    },
+    promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
+    telegramResults: {
+      sendMessage: { ok: false, description: "Forbidden: bot was blocked by the user" },
+    },
+  });
+
+  await sendScheduledAt(harness, now);
+  await sendScheduledAt(harness, now + DAY);
+  assert.equal(harness.telegram.filter(({ method, params }) =>
+    method === "sendMessage" && /setup reminder/.test(params.text)).length, 1);
+  assert.equal(harness.user(134).setup.reminder_consumed, true);
+  assert.equal(harness.user(134).setup.reminder_delivered_at, undefined);
+  assert.ok(harness.user(134).setup.reminder_attempted_at);
+
+  await sendUpdateAt(harness, message(134, "/start"), now + DAY + 1);
+  assert.ok(harness.user(134).setup.reminder_recovered_at);
+});
+
+test("activated, optional-channel, and pre-release users never receive reminders", async () => {
+  const now = Date.parse("2026-08-07T12:00:00.000Z");
+  const stale = new Date(now - 2 * DAY).toISOString();
+  const harness = createHarness({
+    users: {
+      135: activatedUser({ setup_reminder_eligible: true }),
+      136: {
+        setup_reminder_eligible: true, sources: ["naval"], hours: [9],
+        timezone: "Europe/Kyiv",
+        setup: {
+          started_at: stale, last_activity_at: stale, reminder_consumed: true,
+          current_step: "complete", completed_at: stale,
+          timezone_confirmed_at: stale, digest_time_confirmed_at: stale,
+          channel_choice: "not_now",
+        },
+      },
+      137: {
+        sources: [], hours: [9], timezone: null,
+        setup: { started_at: stale, last_activity_at: stale, reminder_consumed: false },
+      },
+    },
+  });
+
+  await sendScheduledAt(harness, now);
+  assert.equal(sentTo(harness, 135).length, 0);
+  assert.equal(sentTo(harness, 136).length, 0);
+  assert.equal(sentTo(harness, 137).length, 0);
 });
 
 test("registered and hidden power-user commands remain available", async () => {
@@ -1080,6 +1239,83 @@ test("skipping the optional Publishing channel is a successful terminal path", a
     ["answerCallbackQuery", "sendMessage"]);
 });
 
+test("activation funnel milestones are recorded once through first publish", async () => {
+  const base = Date.parse("2026-08-10T12:00:00.000Z");
+  const harness = createHarness({
+    promo: Array.from({ length: 50 }, (_, index) => `used-${index}`),
+    states: { 440: { pending: { "30": { source: "naval", text: "Preview" } } } },
+  });
+
+  await sendUpdateAt(harness, message(440, "/start"), base);
+  const startedAt = harness.user(440).setup.started_at;
+  await sendUpdateAt(harness, message(440, "/add naval"), base + 1);
+  await sendUpdateAt(harness, accountValidation(440, "naval", "readable"), base + 2);
+  await sendUpdateAt(harness, message(440, "/timezone Europe/Kyiv"), base + 3);
+  await sendUpdateAt(harness, callback(440, "timezone:confirm"), base + 4);
+  await sendUpdateAt(harness, message(440, "/schedule 8"), base + 5);
+  await sendUpdateAt(harness, message(440, "/channel @firstchannel"), base + 6);
+  await sendUpdateAt(harness, callback(440, "p:30"), base + 7);
+
+  const first = harness.user(440).setup;
+  assert.equal(first.started_at, startedAt);
+  assert.equal(first.first_valid_account_at, new Date(base + 2).toISOString());
+  assert.equal(first.timezone_confirmed_at, new Date(base + 4).toISOString());
+  assert.equal(first.digest_time_confirmed_at, new Date(base + 5).toISOString());
+  assert.equal(first.activated_at, new Date(base + 5).toISOString());
+  assert.equal(first.completed_at, first.activated_at);
+  assert.equal(first.channel_connected_at, new Date(base + 6).toISOString());
+  assert.equal(first.first_publish_at, new Date(base + 7).toISOString());
+
+  const milestones = {
+    started_at: first.started_at,
+    first_valid_account_at: first.first_valid_account_at,
+    timezone_confirmed_at: first.timezone_confirmed_at,
+    digest_time_confirmed_at: first.digest_time_confirmed_at,
+    activated_at: first.activated_at,
+    channel_connected_at: first.channel_connected_at,
+    first_publish_at: first.first_publish_at,
+  };
+  await sendUpdateAt(harness, message(440, "/timezone London"), base + 8);
+  await sendUpdateAt(harness, callback(440, "timezone:confirm"), base + 9);
+  await sendUpdateAt(harness, message(440, "/schedule 9"), base + 10);
+  await sendUpdateAt(harness, message(440, "/channel @secondchannel"), base + 11);
+  await sendUpdateAt(harness, callback(440, "p:30"), base + 12);
+  for (const [field, value] of Object.entries(milestones)) {
+    assert.equal(harness.user(440).setup[field], value, field);
+  }
+});
+
+test("a successful Scheduled publish records the first-publish milestone once", async () => {
+  const now = Date.parse("2026-08-12T12:00:00.000Z");
+  const dueHour = Number(new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Kyiv", hour: "2-digit", hourCycle: "h23",
+  }).format(new Date()));
+  const harness = createHarness({
+    users: {
+      441: activatedUser({
+        channel: "@briefings",
+        channel_verified: { id: "@briefings" },
+        setup_reminder_eligible: true,
+      }),
+    },
+    states: { 441: { pending: { "40": { source: "naval", text: "Preview" } } } },
+    schedules: {
+      "441:1": JSON.stringify({
+        chat: 441, control: 1, ids: "40", tz: "Europe/Kyiv", hour: dueHour,
+      }),
+    },
+    telegramResults: {
+      editMessageText: () => {
+        throw new Error("control update failed");
+      },
+    },
+  });
+
+  await sendScheduledAt(harness, now);
+  assert.equal(harness.user(441).setup.first_publish_at, new Date(now).toISOString());
+  assert.equal(harness.telegram.some(({ method }) => method === "copyMessages"), true);
+});
+
 test("public and forwarded private Publishing channels are verified before saving", async () => {
   const publicChannel = createHarness({ users: { 501: { channel: null } } });
   await sendUpdate(publicChannel, message(501, "/channel @publicchannel"));
@@ -1119,6 +1355,24 @@ test("posting to a verified channel answers before publishing", async () => {
 
   assert.deepEqual(harness.telegram.map(({ method }) => method),
     ["answerCallbackQuery", "copyMessages", "editMessageText"]);
+});
+
+test("a successful publish records its milestone before the control update", async () => {
+  const harness = createHarness({
+    users: {
+      504: activatedUser({
+        channel: "@verified", channel_verified: { id: "@verified" },
+      }),
+    },
+    telegramResults: {
+      editMessageText: () => {
+        throw new Error("control update failed");
+      },
+    },
+  });
+
+  await sendUpdate(harness, callback(504, "p:30"));
+  assert.ok(harness.user(504).setup.first_publish_at);
 });
 
 test("channel verification gives permission-specific repairs and retries", async () => {

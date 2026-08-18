@@ -51,6 +51,7 @@ class DigestHarness:
         self.fetched = fetched
         self.preview_error = preview_error
         self.events = []
+        self.user_saves = []
         self.next_message_id = 1
 
     def send_preview(self, chat_id, media, caption):
@@ -69,6 +70,11 @@ class DigestHarness:
 
     def save_state(self, uid, value):
         self.state[uid] = copy.deepcopy(value)
+
+    def save_user(self, uid, value):
+        saved = copy.deepcopy(value)
+        self.users[uid] = saved
+        self.user_saves.append((uid, saved))
 
     def run(self, force_user=""):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -89,6 +95,7 @@ class DigestHarness:
                 prepare=lambda media: [],
                 make_caption=lambda item, cfg: "Prepared caption",
                 pick_top=lambda candidates, cfg: candidates,
+                save_user=self.save_user,
                 save_user_state=self.save_state,
             ), patch.object(digest.tg, "send_preview", self.send_preview), \
                     patch.object(digest.tg, "send_controls", self.send_controls), \
@@ -143,6 +150,22 @@ class DigestDeliveryTest(unittest.TestCase):
                          ["text", "preview", "controls"])
         self.assertIn("⭐ <b>XGist Pro</b>", pro_events[0][2])
         self.assertIn("curated from 1 watched account", pro_events[0][2])
+        for uid in ["1", "2", "3"]:
+            self.assertIn("first_preview_delivered_at",
+                          harness.users[uid]["setup"])
+        self.assertEqual(len(harness.user_saves), 3)
+
+        first_timestamps = {
+            uid: harness.users[uid]["setup"]["first_preview_delivered_at"]
+            for uid in ["1", "2", "3"]
+        }
+        harness.events.clear()
+        harness.run()
+        self.assertEqual(len(harness.user_saves), 3)
+        self.assertEqual({
+            uid: harness.users[uid]["setup"]["first_preview_delivered_at"]
+            for uid in ["1", "2", "3"]
+        }, first_timestamps)
 
     def test_only_the_first_empty_digest_is_acknowledged(self):
         now = datetime.now(timezone.utc)
@@ -212,6 +235,7 @@ class DigestDeliveryTest(unittest.TestCase):
         harness.run()
 
         self.assertEqual(harness.events, [])
+        self.assertEqual(harness.user_saves, [])
 
     def test_send_text_uses_html_for_briefing_identity(self):
         with patch.object(tg, "call") as call:

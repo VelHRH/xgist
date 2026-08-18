@@ -229,8 +229,9 @@ export default {
           console.log("cron dispatch failed:", resp.status, await resp.text());
         }
       }),
-      publishScheduled(env),
-      sendProInvites(env),
+      publishScheduled(env)
+        .then(() => sendProInvites(env))
+        .then(() => sendSetupReminders(env)),
     ]));
   },
 };
@@ -524,10 +525,18 @@ function updateSetup(user, { currentStep, addingAccount } = {}) {
     started_at: now, completed_at: null, reminder_consumed: false,
     ...user.setup,
   };
+  if (user.setup.reminder_attempted_at && !user.setup.reminder_recovered_at) {
+    user.setup.reminder_recovered_at = now;
+  }
   if (currentStep) user.setup.current_step = currentStep;
   if (addingAccount !== undefined) user.setup.adding_account = addingAccount;
   user.setup.last_activity_at = now;
   return user.setup;
+}
+
+function setSetupTimestamp(user, field, value = new Date(Date.now()).toISOString()) {
+  if (!user.setup[field]) user.setup[field] = value;
+  return user.setup[field];
 }
 
 function requiredSetupStep(user) {
@@ -730,7 +739,7 @@ async function activateWithDigestTimes(env, chatId, hours, from) {
       "before confirming activation.");
   }
   const now = new Date(Date.now()).toISOString();
-  user.setup.digest_time_confirmed_at = now;
+  setSetupTimestamp(user, "digest_time_confirmed_at", now);
   if (wasActivated) {
     user.setup.current_step = "complete";
     user.setup.last_activity_at = now;
@@ -740,7 +749,8 @@ async function activateWithDigestTimes(env, chatId, hours, from) {
     return reply(env, chatId,
       `🕘 Digest times updated: ${times} in <code>${esc(user.timezone)}</code>.`);
   }
-  user.setup.completed_at = user.setup.completed_at || now;
+  setSetupTimestamp(user, "activated_at", now);
+  user.setup.completed_at = user.setup.completed_at || user.setup.activated_at;
   user.setup.current_step = "complete";
   user.setup.last_activity_at = now;
   user.setup.reminder_consumed = false;
@@ -824,7 +834,7 @@ async function confirmTimezone(env, chatId) {
   const previous = user.timezone;
   const wasActivated = !!user.setup.completed_at;
   user.timezone = timezone;
-  user.setup.timezone_confirmed_at = new Date(Date.now()).toISOString();
+  setSetupTimestamp(user, "timezone_confirmed_at");
   updateSetup(user, {
     currentStep: wasActivated ? "complete" : requiredSetupStep(user),
   });
@@ -848,12 +858,16 @@ async function confirmTimezone(env, chatId) {
 }
 
 async function beginAccountValidation(env, chatId, input) {
+  const user = (await loadUser(env, chatId)) || userDefaults();
+  if (!isActivated(user)) {
+    updateSetup(user, { currentStep: "account", addingAccount: true });
+    await saveUser(env, chatId, user);
+  }
   const handle = normalizeHandle(input);
   if (!handle) {
     return reply(env, chatId,
       "That doesn’t look like an X profile. Send one @handle, bare handle, or profile URL.");
   }
-  const user = (await loadUser(env, chatId)) || userDefaults();
   const plan = await resolvePlan(env, chatId, user);
   const current = user.sources || [];
   if (user.account_validation?.handle === handle) {
@@ -916,6 +930,7 @@ async function handleAccountValidation(result, env) {
         { reply_markup: setupAccountKeyboard() });
     }
     user.sources.push(handle);
+    setSetupTimestamp(user, "first_valid_account_at");
     user.setup.current_step = requiredSetupStep(user);
     await saveUser(env, chatId, user);
     return reply(env, chatId,
@@ -1010,11 +1025,67 @@ async function sendProInvites(env) {
   }
 }
 
+const SETUP_REMINDER_DELAY = 24 * 60 * 60 * 1000;
+
+function setupReminderView(user, plan) {
+  const step = requiredSetupStep(user);
+  const intro = `⏰ <b>${activationPlanName(plan)} setup reminder</b>\n\n`;
+  if (step === "account") {
+    return { step, text: intro + accountStepText(plan), reply_markup: MENU };
+  }
+  if (step === "timezone") {
+    if (user.setup.timezone_candidate) {
+      return {
+        step, text: intro + timezoneConfirmationText(user.setup.timezone_candidate),
+        reply_markup: timezoneConfirmationKeyboard(),
+      };
+    }
+    return {
+      step,
+      text: intro + "<b>Guided setup · Step 2 of 3</b>\n\n" +
+        "Choose the timezone for your Digest times. Send a city such as Kyiv or " +
+        "an IANA timezone such as Europe/Kyiv.",
+    };
+  }
+  const view = digestTimeView(user, plan);
+  return { step, text: intro + view.text, reply_markup: view.reply_markup };
+}
+
+async function sendSetupReminders(env) {
+  const ids = (await redis(env, "SMEMBERS", "uids")) || [];
+  if (!ids.length) return;
+  const raws = await redis(env, "MGET", ...ids.map((id) => `user:${id}`));
+  const now = Date.now();
+  for (let index = 0; index < ids.length; index++) {
+    if (!raws[index]) continue;
+    const user = JSON.parse(raws[index]);
+    const setup = user.setup;
+    const activityAt = Date.parse(setup?.last_activity_at || setup?.started_at || "");
+    if (user.setup_reminder_eligible !== true || !setup || isActivated(user) ||
+        setup.reminder_consumed || !Number.isFinite(activityAt) ||
+        now - activityAt < SETUP_REMINDER_DELAY) continue;
+    const plan = await resolvePlan(env, ids[index], user);
+    const view = setupReminderView(user, plan);
+    const attemptedAt = new Date(now).toISOString();
+    setup.reminder_consumed = true;
+    setup.reminder_attempted_at = attemptedAt;
+    setup.abandonment_step = view.step;
+    await saveUser(env, ids[index], user);
+    const result = await reply(env, Number(ids[index]), view.text,
+      view.reply_markup ? { reply_markup: view.reply_markup } : {});
+    if (result.ok) {
+      setup.reminder_delivered_at = attemptedAt;
+      await saveUser(env, ids[index], user);
+    }
+  }
+}
+
 /* ---------------- Commands ---------------- */
 
 function userDefaults() {
   return { channel: null, sources: [], hours: [9], timezone: null,
-           limit: 3, interests: null, style: null, language: "en", paused: false };
+           limit: 3, interests: null, style: null, language: "en", paused: false,
+           setup_reminder_eligible: true };
 }
 
 function channelRetryKeyboard() {
@@ -1062,7 +1133,7 @@ async function verifyPublishingChannel(env, chatId, candidate) {
   if (user.setup) {
     user.setup.reminder_consumed = true;
     user.setup.channel_choice = "connected";
-    user.setup.channel_connected_at = new Date(Date.now()).toISOString();
+    setSetupTimestamp(user, "channel_connected_at");
   }
   await saveUser(env, chatId, user);
   if (user.publishing_intent) {
@@ -1514,6 +1585,12 @@ function controlKeyboard(idsStr, spoilerOn = false) {
   ] };
 }
 
+async function recordFirstPublish(env, chatId, user) {
+  if (!user.setup || user.setup.first_publish_at) return;
+  setSetupTimestamp(user, "first_publish_at");
+  await saveUser(env, chatId, user);
+}
+
 async function publishPreview(env, chatId, controlId, idsStr, user) {
   const ids = idsStr.split(",").map(Number).sort((a, b) => a - b);
   const result = await tg(env, "copyMessages", {
@@ -1525,6 +1602,7 @@ async function publishPreview(env, chatId, controlId, idsStr, user) {
       "The Preview is still available.");
     return false;
   }
+  await recordFirstPublish(env, chatId, user);
   const dest = typeof user.channel === "string" ? user.channel : "your channel";
   await tg(env, "editMessageText", {
     chat_id: chatId, message_id: controlId, text: `✅ Posted to ${dest}`,
@@ -2004,6 +2082,7 @@ async function publishScheduled(env) {
         chat_id: user.channel, from_chat_id: job.chat, message_ids: ids,
       });
       if (result?.ok) {
+        await recordFirstPublish(env, job.chat, user);
         const dest = typeof user.channel === "string" ? user.channel : "your channel";
         await tg(env, "editMessageText", {
           chat_id: job.chat, message_id: job.control,

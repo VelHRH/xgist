@@ -77,6 +77,10 @@ def load_users() -> dict:
     return _mget_json("user")
 
 
+def save_user(uid: str, user: dict) -> None:
+    _redis("SET", f"user:{uid}", json.dumps(user, ensure_ascii=False))
+
+
 def load_whitelist() -> list:
     return _redis("SMEMBERS", "whitelist") or []
 
