@@ -1,7 +1,19 @@
 import os
+import sys
+import types
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+
+
+try:
+    import twscrape
+except ModuleNotFoundError:
+    twscrape = types.ModuleType("twscrape")
+    twscrape.API = object
+    twscrape.Media = object
+    twscrape.MediaVideo = object
+    sys.modules["twscrape"] = twscrape
 
 from pipeline import validate_account
 from pipeline.fetch import _auth_failure

@@ -1929,15 +1929,24 @@ async function handleCallback(cb, env) {
     });
   }
 
-  if (cb.data.startsWith(ACCOUNT_KEEP)) {
+  const isAccountRecovery = cb.data.startsWith(ACCOUNT_KEEP) ||
+    cb.data.startsWith(ACCOUNT_REPLACE);
+  let accountRecoveryContext;
+  if (isAccountRecovery) {
     await answer("");
-    const handle = normalizeHandle(cb.data.slice(ACCOUNT_KEEP.length));
+    const prefix = cb.data.startsWith(ACCOUNT_KEEP) ? ACCOUNT_KEEP : ACCOUNT_REPLACE;
+    const handle = normalizeHandle(cb.data.slice(prefix.length));
     const user = await loadUser(env, chatId);
     const health = handle && user?.account_health?.[handle];
     if (!health?.needs_attention || !user.sources?.includes(handle)) {
       return reply(env, chatId,
         "That Watched account has already recovered or is no longer configured.");
     }
+    accountRecoveryContext = { user, handle, health };
+  }
+
+  if (cb.data.startsWith(ACCOUNT_KEEP)) {
+    const { user, handle, health } = accountRecoveryContext;
     health.keep_trying_at = new Date(Date.now()).toISOString();
     await saveUser(env, chatId, user);
     return tg(env, "editMessageText", {
@@ -1949,14 +1958,7 @@ async function handleCallback(cb, env) {
   }
 
   if (cb.data.startsWith(ACCOUNT_REPLACE)) {
-    await answer("");
-    const handle = normalizeHandle(cb.data.slice(ACCOUNT_REPLACE.length));
-    const user = await loadUser(env, chatId);
-    const health = handle && user?.account_health?.[handle];
-    if (!health?.needs_attention || !user.sources?.includes(handle)) {
-      return reply(env, chatId,
-        "That Watched account has already recovered or is no longer configured.");
-    }
+    const { user, handle } = accountRecoveryContext;
     user.account_replacement = {
       old_handle: handle,
       requested_at: new Date(Date.now()).toISOString(),

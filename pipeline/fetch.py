@@ -171,7 +171,7 @@ async def _fetch_async(handle: str) -> list[dict]:
 
 def fetch_source(handle: str) -> list[dict]:
     """Fetch recent tweets for one account. Returns tweets, newest first.
-    Raises AuthError for invalid sessions and SourceReadError for account failures."""
+    Raises AuthError if the session appears invalid (cookies expired)."""
     try:
         return asyncio.get_event_loop().run_until_complete(_fetch_async(handle))
     except AuthError:
