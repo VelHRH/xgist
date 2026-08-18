@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import sys
 import tempfile
@@ -57,7 +58,10 @@ class DigestHarness:
 
     def fetch_source(self, source):
         self.fetched_sources.append(source)
-        return copy.deepcopy(self.fetched[source])
+        result = self.fetched[source]
+        if isinstance(result, Exception):
+            raise result
+        return copy.deepcopy(result)
 
     def send_preview(self, chat_id, media, caption):
         if self.preview_error:
@@ -72,6 +76,9 @@ class DigestHarness:
 
     def send_text(self, chat_id, text):
         self.events.append(("text", chat_id, text))
+
+    def send_account_attention(self, chat_id, handle):
+        self.events.append(("attention", chat_id, handle))
 
     def save_state(self, uid, value):
         self.state[uid] = copy.deepcopy(value)
@@ -105,11 +112,127 @@ class DigestHarness:
             ), patch.object(digest.tg, "send_preview", self.send_preview), \
                     patch.object(digest.tg, "send_controls", self.send_controls), \
                     patch.object(digest.tg, "send_text", self.send_text), \
+                    patch.object(digest.tg, "send_account_attention",
+                                 self.send_account_attention), \
                     patch.object(digest.tg, "media_refs", lambda messages: []):
                 digest.main()
 
 
 class DigestDeliveryTest(unittest.TestCase):
+    def test_account_health_recovers_before_attention(self):
+        now = datetime.now(timezone.utc)
+        harness = DigestHarness(
+            users={"1": timezone_confirmed({
+                "channel": None,
+                "sources": ["broken", "alice"],
+                "hours": [9],
+            })},
+            state={},
+            fetched={
+                "broken": digest.SourceReadError("temporarily unreadable"),
+                "alice": [tweet(now - timedelta(hours=1))],
+            },
+        )
+
+        harness.run()
+        self.assertEqual(
+            harness.users["1"]["account_health"]["broken"]["consecutive_failures"], 1)
+        self.assertNotIn("needs_attention",
+                         harness.users["1"]["account_health"]["broken"])
+        self.assertIn(("preview", 1, "Prepared caption"), harness.events)
+
+        harness.run()
+        self.assertEqual(
+            harness.users["1"]["account_health"]["broken"]["consecutive_failures"], 2)
+        self.assertNotIn("needs_attention",
+                         harness.users["1"]["account_health"]["broken"])
+        self.assertFalse(any(event[0] == "attention" for event in harness.events))
+
+        harness.fetched["broken"] = []
+        harness.run()
+        self.assertNotIn("account_health", harness.users["1"])
+        self.assertEqual(harness.users["1"]["sources"], ["broken", "alice"])
+
+    def test_third_failure_marks_attention_and_notifies_once(self):
+        now = datetime.now(timezone.utc)
+        harness = DigestHarness(
+            users={"1": timezone_confirmed({
+                "channel": None,
+                "sources": ["broken", "alice"],
+                "hours": [9],
+            })},
+            state={},
+            fetched={
+                "broken": digest.SourceReadError("unreadable"),
+                "alice": [tweet(now - timedelta(hours=1))],
+            },
+        )
+
+        for _ in range(3):
+            harness.run()
+
+        health = harness.users["1"]["account_health"]["broken"]
+        self.assertEqual(health["consecutive_failures"], 3)
+        self.assertTrue(health["needs_attention"])
+        self.assertIn("attention_notified_at", health)
+        self.assertEqual(
+            [event for event in harness.events if event[0] == "attention"],
+            [("attention", 1, "broken")])
+        self.assertEqual(harness.users["1"]["sources"], ["broken", "alice"])
+
+        harness.run()
+        self.assertEqual(
+            [event for event in harness.events if event[0] == "attention"],
+            [("attention", 1, "broken")])
+        self.assertEqual(
+            harness.users["1"]["account_health"]["broken"]["consecutive_failures"], 4)
+
+        harness.fetched["broken"] = []
+        harness.run()
+        self.assertNotIn("account_health", harness.users["1"])
+
+    def test_shared_fetch_updates_each_users_account_health_independently(self):
+        now = datetime.now(timezone.utc)
+        harness = DigestHarness(
+            users={
+                "1": timezone_confirmed({
+                    "channel": None,
+                    "sources": ["broken", "alice"],
+                    "hours": [9],
+                    "account_health": {
+                        "broken": {"consecutive_failures": 1},
+                    },
+                }),
+                "2": timezone_confirmed({
+                    "channel": None,
+                    "sources": ["broken", "alice"],
+                    "hours": [9],
+                    "account_health": {
+                        "broken": {"consecutive_failures": 2},
+                    },
+                }),
+            },
+            state={},
+            fetched={
+                "broken": digest.SourceReadError("unreadable"),
+                "alice": [tweet(now - timedelta(hours=1))],
+            },
+        )
+
+        harness.run()
+
+        self.assertEqual(harness.fetched_sources.count("broken"), 1)
+        self.assertEqual(
+            harness.users["1"]["account_health"]["broken"]["consecutive_failures"], 2)
+        self.assertNotIn("needs_attention",
+                         harness.users["1"]["account_health"]["broken"])
+        self.assertEqual(
+            harness.users["2"]["account_health"]["broken"]["consecutive_failures"], 3)
+        self.assertTrue(harness.users["2"]["account_health"]["broken"]["needs_attention"])
+        self.assertEqual(
+            [event for event in harness.events if event[0] == "attention"],
+            [("attention", 2, "broken")])
+
     def test_inactive_retained_digest_time_is_not_due(self):
         config = timezone_confirmed({
             "channel": None,
@@ -291,6 +414,16 @@ class DigestDeliveryTest(unittest.TestCase):
         call.assert_called_once_with(
             "sendMessage", chat_id=1, text="⭐ <b>XGist Pro</b>",
             parse_mode="HTML")
+
+    def test_account_attention_offers_both_recovery_actions(self):
+        with patch.object(tg, "call") as call:
+            tg.send_account_attention(1, "naval")
+        params = call.call_args.kwargs
+        keyboard = json.loads(params["reply_markup"])["inline_keyboard"][0]
+        self.assertEqual([button["text"] for button in keyboard],
+                         ["Replace account", "Keep trying"])
+        self.assertEqual([button["callback_data"] for button in keyboard],
+                         ["account:replace:naval", "account:keep:naval"])
 
     def test_timezone_confirmation_is_required_for_digest_eligibility(self):
         now = datetime.now(timezone.utc)

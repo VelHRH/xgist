@@ -511,6 +511,8 @@ const HELP_TOPIC = "help:topic:";
 const DOWNGRADE_SOURCE = "downgrade:source:";
 const DOWNGRADE_HOUR = "downgrade:hour:";
 const DOWNGRADE_DONE = "downgrade:done";
+const ACCOUNT_REPLACE = "account:replace:";
+const ACCOUNT_KEEP = "account:keep:";
 const CITY_TIMEZONE_CHOICES = {
   kyiv: [{ label: "Kyiv, Ukraine", zone: "Europe/Kyiv" }],
   kiev: [{ label: "Kyiv, Ukraine", zone: "Europe/Kyiv" }],
@@ -997,25 +999,32 @@ async function beginAccountValidation(env, chatId, input) {
   }
   const plan = await resolvePlan(env, chatId, user);
   const current = user.sources || [];
+  const replace = current.includes(user.account_replacement?.old_handle)
+    ? user.account_replacement.old_handle : null;
   if (user.account_validation?.handle === handle) {
     return reply(env, chatId,
       `I’m already checking ${xlink(handle)}. I’ll message you when it’s verified.`);
   }
   if (current.includes(handle)) {
+    if (replace) {
+      return reply(env, chatId,
+        `${xlink(handle)} is already in your Watched accounts. ` +
+        `Send a different replacement for ${xlink(replace)}.`);
+    }
     return reply(env, chatId,
       `${xlink(handle)} is already in your Watched accounts.\n` +
       `${current.length}/${plan.limits.sources} accounts used.`,
       { reply_markup: setupAccountKeyboard() });
   }
-  if (current.length >= plan.limits.sources) {
+  if (!replace && current.length >= plan.limits.sources) {
     return reply(env, chatId,
       `Your ${plan.tier === "pro" ? "Pro" : "Free"} plan includes ` +
       `${plan.limits.sources} watched accounts. Remove one first` +
       (plan.tier === "pro" ? "." : " or use /pro for 25."));
   }
   const now = new Date().toISOString();
-  updateSetup(user, { currentStep: "account", addingAccount: true });
-  user.account_validation = { handle, requested_at: now };
+  if (!replace) updateSetup(user, { currentStep: "account", addingAccount: true });
+  user.account_validation = { handle, requested_at: now, ...(replace ? { replace } : {}) };
   await saveUser(env, chatId, user);
   const resp = await dispatchDigest(env,
     { account_handle: handle, only_user: String(chatId) });
@@ -1026,7 +1035,26 @@ async function beginAccountValidation(env, chatId, input) {
       `I couldn’t start the account check (HTTP ${resp.status}). Please try again.`);
   }
   return reply(env, chatId,
-    `Checking ${xlink(handle)} now. I’ll message you when it’s verified.`);
+    `Checking ${xlink(handle)} now. I’ll message you when it’s verified` +
+    (replace ? ` as the replacement for ${xlink(replace)}.` : "."));
+}
+
+function accountValidationFailure(handle, outcome, replacement = null) {
+  const suffix = replacement
+    ? ` Send another replacement for ${xlink(replacement)}.` : "";
+  const messages = {
+    nonexistent: `I couldn’t find ${xlink(handle)}. Check the spelling and try again.`,
+    protected: `${xlink(handle)} is protected, so I can’t read its posts. Try a public account.`,
+    unreadable: `${xlink(handle)} exists, but its posts aren’t readable right now. Try another account.`,
+    transient: `X couldn’t verify ${xlink(handle)} right now. Nothing was saved; please try again.`,
+  };
+  return (messages[outcome] || messages.transient) + suffix;
+}
+
+function clearAccountHealth(user, handle) {
+  if (!user.account_health) return;
+  delete user.account_health[handle];
+  if (!Object.keys(user.account_health).length) delete user.account_health;
 }
 
 async function handleAccountValidation(result, env) {
@@ -1035,7 +1063,33 @@ async function handleAccountValidation(result, env) {
   if (!Number.isSafeInteger(chatId) || !handle) return;
   const user = await loadUser(env, chatId);
   if (!user || user.account_validation?.handle !== handle) return;
+  const replacement = user.account_validation.replace || null;
   delete user.account_validation;
+  if (replacement) {
+    const index = user.sources?.indexOf(replacement) ?? -1;
+    if (result.outcome === "readable" && index >= 0 && !user.sources.includes(handle)) {
+      user.sources[index] = handle;
+      if (user.free_active_sources?.includes(replacement)) {
+        user.free_active_sources = user.free_active_sources.map((source) =>
+          source === replacement ? handle : source);
+      }
+      clearAccountHealth(user, replacement);
+      delete user.account_replacement;
+      await saveUser(env, chatId, user);
+      return reply(env, chatId,
+        `✅ ${xlink(replacement)} was replaced with verified ${xlink(handle)}. ` +
+        "Your other Watched accounts are unchanged.");
+    }
+    if (result.outcome === "readable") {
+      delete user.account_replacement;
+      await saveUser(env, chatId, user);
+      return reply(env, chatId,
+        "The Watched accounts changed while verification was running, so nothing was replaced.");
+    }
+    await saveUser(env, chatId, user);
+    return reply(env, chatId,
+      accountValidationFailure(handle, result.outcome, replacement));
+  }
   updateSetup(user, { addingAccount: false });
   if (result.outcome === "readable") {
     const plan = await resolvePlan(env, chatId, user);
@@ -1067,13 +1121,7 @@ async function handleAccountValidation(result, env) {
   }
   user.setup.current_step = "account";
   await saveUser(env, chatId, user);
-  const messages = {
-    nonexistent: `I couldn’t find ${xlink(handle)}. Check the spelling and try again.`,
-    protected: `${xlink(handle)} is protected, so I can’t read its posts. Try a public account.`,
-    unreadable: `${xlink(handle)} exists, but its posts aren’t readable right now. Try another account.`,
-    transient: `X couldn’t verify ${xlink(handle)} right now. Nothing was saved; please try again.`,
-  };
-  return reply(env, chatId, messages[result.outcome] || messages.transient,
+  return reply(env, chatId, accountValidationFailure(handle, result.outcome),
     { reply_markup: { inline_keyboard: [[
       { text: "Try another account", callback_data: "ga" },
     ]] } });
@@ -1453,6 +1501,9 @@ async function handleMessage(msg, env, ctx) {
 
   if (!commandish && msg.text) {
     const user = await loadUser(env, chatId);
+    if (user?.account_replacement) {
+      return beginAccountValidation(env, chatId, msg.text);
+    }
     if (user?.setup?.current_step === "account" || user?.setup?.adding_account) {
       return beginAccountValidation(env, chatId, msg.text);
     }
@@ -1575,6 +1626,8 @@ async function handleMessage(msg, env, ctx) {
         if (u.free_active_sources) {
           u.free_active_sources = u.free_active_sources.filter((s) => s !== handle);
         }
+        clearAccountHealth(u, handle);
+        if (u.account_replacement?.old_handle === handle) delete u.account_replacement;
       }, `🗑 Removed <code>@${esc(handle)}</code>`);
     }
 
@@ -1874,6 +1927,50 @@ async function handleCallback(cb, env) {
       parse_mode: "HTML", reply_markup: { inline_keyboard: [] },
       link_preview_options: { is_disabled: true },
     });
+  }
+
+  const isAccountRecovery = cb.data.startsWith(ACCOUNT_KEEP) ||
+    cb.data.startsWith(ACCOUNT_REPLACE);
+  let accountRecoveryContext;
+  if (isAccountRecovery) {
+    await answer("");
+    const prefix = cb.data.startsWith(ACCOUNT_KEEP) ? ACCOUNT_KEEP : ACCOUNT_REPLACE;
+    const handle = normalizeHandle(cb.data.slice(prefix.length));
+    const user = await loadUser(env, chatId);
+    const health = handle && user?.account_health?.[handle];
+    if (!health?.needs_attention || !user.sources?.includes(handle)) {
+      return reply(env, chatId,
+        "That Watched account has already recovered or is no longer configured.");
+    }
+    accountRecoveryContext = { user, handle, health };
+  }
+
+  if (cb.data.startsWith(ACCOUNT_KEEP)) {
+    const { user, handle, health } = accountRecoveryContext;
+    health.keep_trying_at = new Date(Date.now()).toISOString();
+    await saveUser(env, chatId, user);
+    return tg(env, "editMessageText", {
+      chat_id: chatId, message_id: controlId,
+      text: `✅ I’ll keep trying ${xlink(handle)}. A successful read will clear its attention state.`,
+      parse_mode: "HTML", reply_markup: { inline_keyboard: [] },
+      link_preview_options: { is_disabled: true },
+    });
+  }
+
+  if (cb.data.startsWith(ACCOUNT_REPLACE)) {
+    const { user, handle } = accountRecoveryContext;
+    user.account_replacement = {
+      old_handle: handle,
+      requested_at: new Date(Date.now()).toISOString(),
+    };
+    await saveUser(env, chatId, user);
+    await tg(env, "editMessageReplyMarkup", {
+      chat_id: chatId, message_id: controlId,
+      reply_markup: { inline_keyboard: [] },
+    });
+    return reply(env, chatId,
+      `Send the X account that should replace ${xlink(handle)}. ` +
+      "I’ll verify it before changing your Watched accounts.");
   }
 
   if (cb.data.startsWith(SETUP_EDIT)) {

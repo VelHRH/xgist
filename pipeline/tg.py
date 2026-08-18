@@ -94,3 +94,19 @@ def send_controls(chat_id: int, content_ids: list[int], label: str) -> None:
 
 def send_text(chat_id: int, text: str) -> None:
     call("sendMessage", chat_id=chat_id, text=text[:4096], parse_mode="HTML")
+
+
+def send_account_attention(chat_id: int, handle: str) -> None:
+    keyboard = {"inline_keyboard": [[
+        {"text": "Replace account", "callback_data": f"account:replace:{handle}"},
+        {"text": "Keep trying", "callback_data": f"account:keep:{handle}"},
+    ]]}
+    call(
+        "sendMessage",
+        chat_id=chat_id,
+        text=(f"⚠️ <b>@{handle} needs attention</b>\n\n"
+              "I couldn’t read this Watched account in three consecutive Digests. "
+              "I haven’t removed it."),
+        parse_mode="HTML",
+        reply_markup=json.dumps(keyboard),
+    )

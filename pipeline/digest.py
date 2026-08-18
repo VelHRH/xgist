@@ -17,7 +17,7 @@ from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, THREAD_MEDIA_CAP,
                      TMP_DIR, load_feedback, load_promo, load_state, load_users,
                      load_whitelist, refund_thread_quota, save_user, save_user_state,
                      should_alert)
-from .fetch import AuthError, fetch_source, fetch_thread
+from .fetch import AuthError, SourceReadError, fetch_source, fetch_thread
 from .media import prepare
 from .plans import apply_plan, resolve_plan
 from .rank import engagement, pick_top
@@ -133,6 +133,40 @@ def _publishing_prompt(cfg: dict) -> str:
                 "Tap ✅ Post when you're ready to connect one.")
     dest = cfg["channel"] if isinstance(cfg["channel"], str) else "your channel"
     return f"Publish to {dest}?"
+
+
+def _update_account_health(uid: str, cfg: dict, stored: dict,
+                           failed_sources: set[str], now: datetime) -> None:
+    configured = set(stored.get("sources") or [])
+    health = stored.setdefault("account_health", {})
+    changed = False
+    for source in list(health):
+        if source not in configured:
+            del health[source]
+            changed = True
+    for source in cfg["sources"]:
+        if source not in failed_sources:
+            if source in health:
+                del health[source]
+                changed = True
+            continue
+        entry = health.setdefault(source, {})
+        entry["consecutive_failures"] = entry.get("consecutive_failures", 0) + 1
+        changed = True
+        if entry["consecutive_failures"] < 3:
+            continue
+        entry["needs_attention"] = True
+        if entry.get("attention_notified_at"):
+            continue
+        try:
+            tg.send_account_attention(int(uid), source)
+            entry["attention_notified_at"] = now.isoformat()
+        except Exception:
+            log.exception("failed to notify user %s about @%s", uid, source)
+    if not health:
+        del stored["account_health"]
+    if changed:
+        save_user(uid, stored)
 
 
 def _record_pending(user_state: dict, content_ids: list[int], *,
@@ -254,19 +288,26 @@ def main() -> None:
     sources = sorted({s for cfg in due.values() for s in cfg["sources"]})
     log.info("fetching %d sources for %d users", len(sources), len(due))
     fetched: dict[str, list] = {}
+    failed_sources: set[str] = set()
     for s in sources:
         try:
             fetched[s] = fetch_source(s)
         except AuthError:
             _alert_cookie_expiry()
             return
+        except SourceReadError as exc:
+            failed_sources.add(s)
+            log.warning("source read failed for @%s: %s", s, exc)
         fetched.setdefault(s, [])
+
+    for uid, cfg in due.items():
+        _update_account_health(uid, cfg, stored_users[uid], failed_sources, now)
 
     # A quiet account still has *some* recent posts in FETCH_RANGE, so zero
     # tweets across every source means fetching itself is broken, not a slow
     # news day. Alert and bail without advancing last_run_hour, so the next
     # slot retries and the digest self-heals once twscrape works again.
-    if sources and not any(fetched.values()):
+    if sources and not failed_sources and not any(fetched.values()):
         _alert_fetch_broken(len(sources))
         return
 

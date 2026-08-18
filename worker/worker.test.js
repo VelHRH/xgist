@@ -1003,6 +1003,105 @@ test("validation outcomes are distinct, recoverable, and never save an unreadabl
   }
 });
 
+test("Keep trying retains the Watched account until a successful read clears attention", async () => {
+  const harness = createHarness({
+    users: {
+      235: activatedUser({
+        sources: ["broken", "naval"],
+        account_health: {
+          broken: {
+            consecutive_failures: 3,
+            needs_attention: true,
+            attention_notified_at: "2026-08-18T09:00:00.000Z",
+          },
+        },
+      }),
+    },
+  });
+
+  await sendUpdate(harness, callback(235, "account:keep:broken"));
+
+  const user = harness.user(235);
+  assert.deepEqual(user.sources, ["broken", "naval"]);
+  assert.equal(user.account_health.broken.needs_attention, true);
+  assert.ok(user.account_health.broken.keep_trying_at);
+  assert.deepEqual(harness.telegram.map(({ method }) => method),
+    ["answerCallbackQuery", "editMessageText"]);
+  assert.match(harness.telegram[1].params.text, /successful read will clear/);
+  assert.deepEqual(harness.telegram[1].params.reply_markup.inline_keyboard, []);
+});
+
+test("Replace account verifies and swaps only the selected Watched account", async () => {
+  const setup = activatedUser().setup;
+  const harness = createHarness({
+    users: {
+      236: activatedUser({
+        sources: ["naval", "broken", "pmarca"],
+        free_active_sources: ["naval", "broken", "pmarca"],
+        account_health: {
+          broken: {
+            consecutive_failures: 3,
+            needs_attention: true,
+            attention_notified_at: "2026-08-18T09:00:00.000Z",
+          },
+          naval: { consecutive_failures: 1 },
+        },
+      }),
+    },
+  });
+
+  await sendUpdate(harness, callback(236, "account:replace:broken"));
+  assert.equal(harness.user(236).account_replacement.old_handle, "broken");
+  assert.deepEqual(harness.telegram.slice(0, 3).map(({ method }) => method),
+    ["answerCallbackQuery", "editMessageReplyMarkup", "sendMessage"]);
+
+  await sendUpdate(harness, message(236, "replacement"));
+  assert.deepEqual(harness.user(236).sources, ["naval", "broken", "pmarca"]);
+  assert.deepEqual(harness.user(236).account_validation, {
+    handle: "replacement",
+    requested_at: harness.user(236).account_validation.requested_at,
+    replace: "broken",
+  });
+  assert.deepEqual(harness.github.at(-1).inputs,
+    { account_handle: "replacement", only_user: "236" });
+
+  await sendUpdate(harness, accountValidation(236, "replacement", "readable"));
+  const user = harness.user(236);
+  assert.deepEqual(user.sources, ["naval", "replacement", "pmarca"]);
+  assert.deepEqual(user.free_active_sources, ["naval", "replacement", "pmarca"]);
+  assert.deepEqual(user.account_health, { naval: { consecutive_failures: 1 } });
+  assert.equal(user.account_replacement, undefined);
+  assert.equal(user.account_validation, undefined);
+  assert.deepEqual(user.setup, setup);
+  assert.match(sentTo(harness, 236).at(-1), /other Watched accounts are unchanged/);
+});
+
+test("failed replacement validation preserves the original account and replacement flow", async () => {
+  const harness = createHarness({
+    users: {
+      237: activatedUser({
+        sources: ["broken", "naval"],
+        account_health: {
+          broken: { consecutive_failures: 3, needs_attention: true },
+        },
+      }),
+    },
+  });
+
+  await sendUpdate(harness, callback(237, "account:replace:broken"));
+  await sendUpdate(harness, message(237, "privateone"));
+  await sendUpdate(harness, accountValidation(237, "privateone", "protected"));
+
+  assert.deepEqual(harness.user(237).sources, ["broken", "naval"]);
+  assert.equal(harness.user(237).account_replacement.old_handle, "broken");
+  assert.equal(harness.user(237).setup.current_step, "complete");
+  assert.match(sentTo(harness, 237).at(-1), /Send another replacement for .*@broken/);
+
+  await sendUpdate(harness, message(237, "readableone"));
+  await sendUpdate(harness, accountValidation(237, "readableone", "readable"));
+  assert.deepEqual(harness.user(237).sources, ["readableone", "naval"]);
+});
+
 test("duplicate accounts and plan limits do not dispatch validation", async () => {
   const promo = Array.from({ length: 50 }, (_, index) => `used-${index}`);
   const duplicate = createHarness({
