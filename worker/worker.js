@@ -1722,8 +1722,9 @@ async function handleMessage(msg, env, ctx) {
           { reply_markup: view.reply_markup });
       }
       if (promoGranted && env.ADMIN_ID) {
+        const name = [msg.from.first_name, msg.from.last_name].filter(Boolean).join(" ");
         await reply(env, Number(env.ADMIN_ID),
-          `🎁 Promo slot used by id ${chatId}` +
+          `🎁 Promo slot used by ${esc(name)} (id ${chatId})` +
           (msg.from.username ? ` (@${esc(msg.from.username)})` : ""));
       }
       return;

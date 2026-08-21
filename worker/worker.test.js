@@ -310,6 +310,16 @@ test("a promotional trial is granted before the first welcome", async () => {
   assert.ok(Date.parse(harness.user(101).paid_until) > Date.now() + 29 * DAY);
 });
 
+test("a promotional trial notifies the admin with the user's name", async () => {
+  const harness = createHarness();
+  await sendUpdate(harness, message(101, "/start", {
+    first_name: "Marta", last_name: "Koval", username: "mkoval",
+  }), { ADMIN_ID: "999" });
+
+  assert.equal(sentTo(harness, 999)[0],
+    "🎁 Promo slot used by Marta Koval (id 101) (@mkoval)");
+});
+
 test("free access keeps the existing limits and upgrade action", async () => {
   const promo = Array.from({ length: 50 }, (_, index) => `promo-${index}`);
   const harness = createHarness({
