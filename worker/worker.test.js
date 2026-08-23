@@ -342,15 +342,50 @@ test("free access keeps the existing limits and upgrade action", async () => {
     "Update to 25 accounts, 6 schedules and more with /pro");
 });
 
-test("setup and help commands have no response", async () => {
+test("setup has no response and Help stays in the persistent menu for every role", async () => {
   const original = activatedUser();
   const harness = createHarness({ users: { 110: original } });
 
   await sendUpdate(harness, message(110, "/setup"));
-  await sendUpdate(harness, message(110, "/help"));
 
   assert.equal(harness.telegram.length, 0);
   assert.deepEqual(harness.user(110), original);
+
+  for (const overrides of [{}, { ADMIN_ID: "111" }]) {
+    const role = createHarness();
+    await sendUpdate(role, message(111, "/start"), overrides);
+    const welcome = role.telegram.find(({ method }) => method === "sendMessage");
+    assert.deepEqual(welcome.params.reply_markup.keyboard.flat().map(({ text }) => text), [
+      "⚙️ Settings", "📋 My accounts", "❓ Help",
+    ]);
+    assert.equal(welcome.params.reply_markup.is_persistent, true);
+
+    await sendUpdate(role, message(111, "❓ Help"), overrides);
+    assert.match(sentTo(role, 111).at(-1), /❓ <b>Help<\/b>/);
+  }
+});
+
+test("help opens navigation topics and every topic answers its callback", async () => {
+  const harness = createHarness();
+  await sendUpdate(harness, message(112, "/help"));
+
+  const menu = harness.telegram.find(({ method }) => method === "sendMessage");
+  assert.deepEqual(menu.params.reply_markup.inline_keyboard.flat().map(({ text }) => text), [
+    "Settings", "Accounts and briefings", "Publishing", "Preview editing", "Free versus Pro",
+  ]);
+
+  for (const [topic, expected] of [
+    ["setup", /Settings/],
+    ["briefings", /Watched accounts and briefings/],
+    ["publishing", /Publishing/],
+    ["preview", /Preview editing/],
+    ["plans", /Free versus Pro/],
+  ]) {
+    const before = harness.telegram.length;
+    await sendUpdate(harness, callback(112, `help:topic:${topic}`));
+    assert.equal(harness.telegram[before].method, "answerCallbackQuery");
+    assert.match(sentTo(harness, 112).at(-1), expected);
+  }
 });
 
 test("activated start shows plan-aware configured value while unactivated start resumes setup", async () => {
@@ -678,7 +713,7 @@ test("registered and hidden power-user commands remain available", async () => {
     assert.ok(registered.includes(command), command);
   }
   assert.ok(!registered.includes("setup"));
-  assert.ok(!registered.includes("help"));
+  assert.ok(registered.includes("help"));
 
   await sendUpdate(harness, message(124, "/language uk"));
   await sendUpdate(harness, message(124, "/style concise"));
