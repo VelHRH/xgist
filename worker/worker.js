@@ -22,25 +22,6 @@
  * POST requests are the Telegram webhook.
  */
 
-const HELP = "❓ <b>Help</b>\n\nChoose a topic. Power-user commands remain available in the / menu.";
-
-const HELP_TOPICS = {
-  setup: "<b>Settings</b>\n\n/start opens your home or resumes Guided setup. After activation, /settings shows your saved configuration and safe edit actions.",
-  briefings: "<b>Watched accounts and briefings</b>\n\nUse /add and /remove to edit Watched accounts. Use /schedule to choose Digest times. /list shows the accounts you watch.",
-  publishing: "<b>Publishing</b>\n\nA Publishing channel is optional. Use /channel after adding me as an administrator with permission to post. Private Previews still arrive here without a channel.",
-  preview: "<b>Preview editing</b>\n\nUse ✏️ Edit to rewrite text or replace media, 🫥 Spoiler to blur content, ✅ Post to publish, ❌ Skip to discard, or 🕐 Schedule for a later Scheduled publish.",
-  plans: "<b>Free versus Pro</b>\n\n/settings shows your current plan and limits. /pro shows the Pro offer or the source and status of your active Pro access.",
-};
-
-const ADMIN_HELP = `
-
-Admin:
-/whitelist 123456789 — give a user Pro limits for free
-/unwhitelist 123456789 — revoke courtesy access
-/whitelisted — list whitelisted ids
-/users — list all registered users
-/gen_digest_now — run your digest immediately`;
-
 // Free vs pro limits. Whitelisted users (and the admin) get pro; later,
 // paying users plug into the same check.
 const LIMITS = {
@@ -277,7 +258,6 @@ async function reply(env, chatId, text, extra = {}) {
 const MENU = {
   keyboard: [
     [{ text: "⚙️ Settings" }, { text: "📋 My accounts" }],
-    [{ text: "❓ Help" }],
   ],
   resize_keyboard: true,
   is_persistent: true,
@@ -285,7 +265,6 @@ const MENU = {
 const MENU_BUTTONS = {
   "⚙️ Settings": "/settings",
   "📋 My accounts": "/list",
-  "❓ Help": "/help",
 };
 
 // Registered in Telegram's "/" autocomplete via GET /setup-commands?key=<WEBHOOK_SECRET>
@@ -303,7 +282,6 @@ const COMMANDS = [
   ["settings", "review and edit your settings"],
   ["pro", "upgrade to Pro ⭐"],
   ["feedback", "message the maker"],
-  ["help", "how it all works"],
 ];
 const ADMIN_COMMANDS = [
   ["gen_digest_now", "run your digest now (admin)"],
@@ -505,7 +483,6 @@ const CHANNEL_PUBLISH = "channel:publish";
 const CHANNEL_NOT_NOW = "channel:not-now";
 const NAV_SETUP = "nav:setup";
 const SETUP_EDIT = "setup:edit:";
-const HELP_TOPIC = "help:topic:";
 const ACCOUNT_ADD = "account:add";
 const ACCOUNT_ACTIVE_PICK = "account:active:pick:";
 const ACCOUNT_ACTIVE_DONE = "account:active:done";
@@ -764,19 +741,6 @@ function homeView(user, plan, firstName) {
     reply_markup: { inline_keyboard: [[
       { text: "⚙️ Settings", callback_data: NAV_SETUP },
     ]] },
-  };
-}
-
-function helpView(isAdmin = false) {
-  return {
-    text: HELP + (isAdmin ? ADMIN_HELP : ""),
-    reply_markup: { inline_keyboard: [
-      [{ text: "Settings", callback_data: `${HELP_TOPIC}setup` }],
-      [{ text: "Accounts and briefings", callback_data: `${HELP_TOPIC}briefings` }],
-      [{ text: "Publishing", callback_data: `${HELP_TOPIC}publishing` }],
-      [{ text: "Preview editing", callback_data: `${HELP_TOPIC}preview` }],
-      [{ text: "Free versus Pro", callback_data: `${HELP_TOPIC}plans` }],
-    ] },
   };
 }
 
@@ -1767,12 +1731,8 @@ async function handleMessage(msg, env, ctx) {
     }
 
     case "/setup":
+    case "/help":
       return;
-
-    case "/help": {
-      const view = helpView(isAdmin);
-      return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
-    }
 
     case "/feedback": {
       if (!arg) {
@@ -2017,13 +1977,6 @@ async function handleCallback(cb, env) {
     await answer("");
     const view = await settingsView(env, chatId);
     return reply(env, chatId, view.text, { reply_markup: view.reply_markup });
-  }
-
-  if (cb.data.startsWith(HELP_TOPIC)) {
-    await answer("");
-    const topic = HELP_TOPICS[cb.data.slice(HELP_TOPIC.length)];
-    if (topic) return reply(env, chatId, topic);
-    return;
   }
 
   const isDowngradeCallback = cb.data === DOWNGRADE_DONE ||
