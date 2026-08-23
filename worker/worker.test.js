@@ -367,6 +367,12 @@ test("activated start shows plan-aware configured value while unactivated start 
   assert.match(freeHome, /Publishing channel: @briefings/);
   assert.match(freeHome, /XGist Free/);
   assert.doesNotMatch(freeHome, /Maximum|5 Watched accounts|Guided setup/);
+  const freeHomeMessage = free.telegram.find(({ method }) => method === "sendMessage");
+  assert.deepEqual(freeHomeMessage.params.reply_markup.keyboard.flat().map(({ text }) => text), [
+    "⚙️ Settings", "📋 My accounts",
+  ]);
+  assert.equal(freeHomeMessage.params.reply_markup.is_persistent, true);
+  assert.equal(freeHomeMessage.params.reply_markup.inline_keyboard, undefined);
 
   const paidUntil = new Date(Date.now() + DAY).toISOString();
   const pro = createHarness({
@@ -377,6 +383,10 @@ test("activated start shows plan-aware configured value while unactivated start 
   assert.match(proHome, /^🏠 <b>Marta, your daily briefings<\/b>/);
   assert.match(proHome, /XGist Pro/);
   assert.doesNotMatch(proHome, /25 Watched accounts|6 Digest times|Maximum/);
+  const proHomeMessage = pro.telegram.find(({ method }) => method === "sendMessage");
+  assert.deepEqual(proHomeMessage.params.reply_markup.keyboard.flat().map(({ text }) => text), [
+    "⚙️ Settings", "📋 My accounts",
+  ]);
 
   const unactivated = createHarness({ promo });
   await sendUpdate(unactivated, message(122, "/start"));

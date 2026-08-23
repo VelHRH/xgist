@@ -738,9 +738,7 @@ function homeView(user, plan, firstName) {
       `🌍 Timezone: ${user.timezone ? esc(user.timezone) : "not set"}\n` +
       `📢 Publishing channel: ${user.channel ? esc(String(user.channel)) : "not connected"}\n\n` +
       planPresentation(plan).label,
-    reply_markup: { inline_keyboard: [[
-      { text: "⚙️ Settings", callback_data: NAV_SETUP },
-    ]] },
+    reply_markup: MENU,
   };
 }
 
