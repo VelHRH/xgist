@@ -300,6 +300,10 @@ def main() -> None:
             log.warning("source read failed for @%s: %s", s, exc)
         fetched.setdefault(s, [])
 
+    if len(sources) > 1 and failed_sources == set(sources):
+        _alert_fetch_broken(len(sources))
+        return
+
     for uid, cfg in due.items():
         _update_account_health(uid, cfg, stored_users[uid], failed_sources, now)
 

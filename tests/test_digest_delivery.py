@@ -119,6 +119,48 @@ class DigestHarness:
 
 
 class DigestDeliveryTest(unittest.TestCase):
+    def test_all_source_failures_leave_slot_and_account_health_unchanged(self):
+        now = datetime.now(timezone.utc)
+        previous_state = {
+            "last_run_hour": "2026-08-24 09",
+            "last_digest_at": (now - timedelta(days=1)).isoformat(),
+        }
+        harness = DigestHarness(
+            users={"1": timezone_confirmed({
+                "channel": None,
+                "sources": ["alice", "bob"],
+                "hours": [9],
+            })},
+            state={"1": copy.deepcopy(previous_state)},
+            fetched={
+                "alice": digest.SourceReadError("unreadable"),
+                "bob": digest.SourceReadError("unreadable"),
+            },
+        )
+
+        harness.run()
+
+        self.assertEqual(harness.state["1"], previous_state)
+        self.assertNotIn("account_health", harness.users["1"])
+        self.assertEqual(harness.events, [])
+
+    def test_single_source_failure_updates_account_health(self):
+        harness = DigestHarness(
+            users={"1": timezone_confirmed({
+                "channel": None,
+                "sources": ["alice"],
+                "hours": [9],
+            })},
+            state={},
+            fetched={"alice": digest.SourceReadError("unreadable")},
+        )
+
+        harness.run()
+
+        self.assertEqual(
+            harness.users["1"]["account_health"]["alice"]["consecutive_failures"], 1)
+        self.assertIn("last_run_hour", harness.state["1"])
+
     def test_account_health_recovers_before_attention(self):
         now = datetime.now(timezone.utc)
         harness = DigestHarness(
