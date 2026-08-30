@@ -11,6 +11,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from math import log1p
 
 from .config import CLAUDE_MODEL, DEFAULT_POSTS_PER_DIGEST, SHORTLIST_SIZE
 
@@ -36,10 +37,34 @@ def engagement(tweet: dict) -> int:
 
 
 def smart_score(tweet: dict, now: datetime) -> float:
-    """Relative-to-account engagement with a mild recency boost."""
+    """Absolute and relative engagement with a mild recency boost."""
+    absolute = log1p(engagement(tweet))
     relative = (engagement(tweet) + 1) / (tweet.get("baseline", 0) + 1)
     age_hours = max((now - tweet["date"]).total_seconds() / 3600, 0.5)
-    return relative / (age_hours ** 0.3)
+    return (absolute + log1p(relative)) / (age_hours ** 0.3)
+
+
+def _shortlist(tweets: list[dict], now: datetime) -> list[dict]:
+    ranked = sorted(tweets, key=lambda t: smart_score(t, now), reverse=True)
+    shortlist = ranked[:SHORTLIST_SIZE]
+    hottest = max(tweets, key=engagement)
+    if shortlist and all(t["id"] != hottest["id"] for t in shortlist):
+        shortlist[-1] = hottest
+        shortlist.sort(key=lambda t: smart_score(t, now), reverse=True)
+    return shortlist
+
+
+def _preserve_breakout(shortlist: list[dict], picked: list[dict],
+                       limit: int) -> list[dict]:
+    if not shortlist or not picked or limit < 1:
+        return picked
+    hottest = max(shortlist, key=engagement)
+    if any(t["id"] == hottest["id"] for t in picked):
+        return picked
+    picked_peak = max(engagement(t) for t in picked)
+    if engagement(hottest) < 1000 or engagement(hottest) < picked_peak * 10:
+        return picked
+    return [hottest, *picked][:limit]
 
 
 def pick_top(tweets: list[dict], user: dict) -> list[dict]:
@@ -47,15 +72,15 @@ def pick_top(tweets: list[dict], user: dict) -> list[dict]:
     if len(tweets) <= limit:
         return tweets
     now = datetime.now(timezone.utc)
-    shortlist = sorted(tweets, key=lambda t: smart_score(t, now),
-                       reverse=True)[:SHORTLIST_SIZE]
+    shortlist = _shortlist(tweets, now)
     if not os.getenv("ANTHROPIC_API_KEY"):
-        return shortlist[:limit]
+        return _preserve_breakout(shortlist, shortlist[:limit], limit)
     try:
-        return _claude_pick(shortlist, user, limit, now)
+        picked = _claude_pick(shortlist, user, limit, now)
+        return _preserve_breakout(shortlist, picked, limit)
     except Exception:
         log.exception("Claude ranking failed, falling back to statistical order")
-        return shortlist[:limit]
+        return _preserve_breakout(shortlist, shortlist[:limit], limit)
 
 
 def _describe(tweet: dict, now: datetime) -> str:
@@ -98,8 +123,13 @@ def _claude_pick(shortlist: list[dict], user: dict, limit: int,
         system=(
             "You curate content for a Telegram channel. From the candidate tweets, "
             f"pick the {limit} most interesting to repost. Prefer substance, novelty "
-            "and self-contained posts. A high 'x usual engagement' number means the "
-            "post is a standout for that account — often a gem. Avoid: engagement "
+            "and self-contained posts. The candidate data was fetched directly from X "
+            "immediately before this request; treat it as current source material and "
+            "do not reject claims because they postdate your knowledge. Absolute "
+            "engagement is the primary signal that a post is on fire. A high 'x usual "
+            "engagement' number is a secondary signal that a post is a standout for "
+            "that account. Do not omit a candidate with dramatically higher absolute "
+            "engagement without a strong content-quality reason. Avoid: engagement "
             "bait, giveaways, ads, pure replies, and duplicate stories (if several "
             "candidates cover the same news, pick only the single best one). "
             f"Channel owner's preferences: {interests}"
