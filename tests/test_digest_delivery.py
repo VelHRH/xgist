@@ -294,6 +294,42 @@ class DigestDeliveryTest(unittest.TestCase):
             self.assertEqual(digest._due_slot(applied, {}, evening),
                              "2026-08-18 18")
 
+    def test_missed_slots_are_replayed_in_order(self):
+        config = timezone_confirmed({
+            "channel": None,
+            "sources": ["alice"],
+            "hours": [9, 12],
+            "timezone": "UTC",
+        })
+        state = {"last_run_hour": "2026-08-24 12"}
+        first_run = datetime(2026, 8, 25, 15, tzinfo=timezone.utc)
+
+        with patch.dict(os.environ, {"FORCE_ALL": ""}):
+            first_slot = digest._due_slot(config, state, first_run)
+            self.assertEqual(first_slot, "2026-08-25 09")
+
+            state["last_run_hour"] = first_slot
+            next_slot = digest._due_slot(
+                config, state, datetime(2026, 8, 25, 16, tzinfo=timezone.utc))
+            self.assertEqual(next_slot, "2026-08-25 12")
+
+    def test_missed_slot_older_than_retention_window_is_not_replayed(self):
+        config = timezone_confirmed({
+            "channel": None,
+            "sources": ["alice"],
+            "hours": [12],
+            "timezone": "UTC",
+        })
+        state = {"last_run_hour": "2026-08-23 12"}
+
+        with patch.dict(os.environ, {"FORCE_ALL": ""}):
+            self.assertEqual(digest.CATCH_UP_HOURS, 26)
+            self.assertEqual(
+                digest._due_slot(
+                    config, state,
+                    datetime(2026, 8, 25, 15, tzinfo=timezone.utc)),
+                "2026-08-25 12")
+
     def test_free_digest_fetches_only_selected_active_accounts(self):
         now = datetime.now(timezone.utc)
         active = ["one", "three", "four", "six", "seven"]

@@ -43,7 +43,11 @@ async def _get_api() -> twscrape.API:
     if _api is not None:
         return _api
 
-    api = twscrape.API(str(_DB))
+    api = twscrape.API(
+        str(_DB),
+        raise_when_no_account=True,
+        wait_timeout=30,
+    )
     cookies_raw = os.environ.get("TWITTER_COOKIES", "")
     username = os.environ.get("TWITTER_USERNAME", "xgist")
 

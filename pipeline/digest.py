@@ -70,9 +70,10 @@ def _alert_fetch_broken(sources: int) -> None:
         )
 
 
-# GitHub's hourly cron fires late or skips slots entirely, so a scheduled
-# hour still counts as due for this long after it passed (if not yet served).
-CATCH_UP_HOURS = 2
+# GitHub's hourly cron fires late or skips slots entirely, so scheduled hours
+# remain due long enough to recover after an extended X outage.
+CATCH_UP_HOURS = MAX_TWEET_AGE_HOURS
+INITIAL_CATCH_UP_HOURS = 2
 
 
 def _due_slot(cfg: dict, user_state: dict, now: datetime) -> str | None:
@@ -94,11 +95,18 @@ def _due_slot(cfg: dict, user_state: dict, now: datetime) -> str | None:
         return local.strftime("%Y-%m-%d %H")
     hours = cfg.get("hours") or [9]
     served = user_state.get("last_run_hour") or ""
-    for back in range(CATCH_UP_HOURS + 1):
-        slot = local - timedelta(hours=back)
+    confirmed_at = cfg.get("setup", {}).get("digest_time_confirmed_at")
+    try:
+        confirmed = datetime.fromisoformat(confirmed_at).astimezone(tz)
+    except (TypeError, ValueError):
+        confirmed = local
+    local_hour = local.replace(minute=0, second=0, microsecond=0)
+    lookback = CATCH_UP_HOURS if served else INITIAL_CATCH_UP_HOURS
+    for back in range(lookback, -1, -1):
+        slot = local_hour - timedelta(hours=back)
         if slot.hour in hours:
             key = slot.strftime("%Y-%m-%d %H")
-            if key > served:
+            if slot >= confirmed and key > served:
                 return key
     return None
 
