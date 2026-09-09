@@ -125,6 +125,10 @@ class SourceReadError(Exception):
     pass
 
 
+class ScraperUnavailableError(Exception):
+    pass
+
+
 def _auth_failure(exc: Exception) -> bool:
     message = str(exc).lower()
     if "no active accounts" in message:
@@ -134,6 +138,11 @@ def _auth_failure(exc: Exception) -> bool:
     ))
 
 
+def _scraper_unavailable(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "403" in message or "no account available" in message
+
+
 async def _fetch_async(handle: str) -> list[dict]:
     api = await _get_api()
     try:
@@ -141,6 +150,9 @@ async def _fetch_async(handle: str) -> list[dict]:
     except Exception as exc:
         if _auth_failure(exc):
             raise AuthError(f"session invalid for @{handle}: {exc}") from exc
+        if _scraper_unavailable(exc):
+            raise ScraperUnavailableError(
+                f"scraper unavailable while resolving @{handle}: {exc}") from exc
         raise SourceReadError(f"could not resolve @{handle}: {exc}") from exc
     if user is None:
         raise SourceReadError(f"@{handle} not found")
@@ -167,6 +179,9 @@ async def _fetch_async(handle: str) -> list[dict]:
     except Exception as exc:
         if _auth_failure(exc):
             raise AuthError(f"session invalid for @{handle}: {exc}") from exc
+        if _scraper_unavailable(exc):
+            raise ScraperUnavailableError(
+                f"scraper unavailable while fetching @{handle}: {exc}") from exc
         raise SourceReadError(f"error fetching @{handle}: {exc}") from exc
 
     tweets.sort(key=lambda t: t["date"], reverse=True)
@@ -180,9 +195,16 @@ def fetch_source(handle: str) -> list[dict]:
         return asyncio.get_event_loop().run_until_complete(_fetch_async(handle))
     except AuthError:
         raise
+    except ScraperUnavailableError:
+        raise
     except SourceReadError:
         raise
     except Exception as exc:
+        if _auth_failure(exc):
+            raise AuthError(f"session invalid for @{handle}: {exc}") from exc
+        if _scraper_unavailable(exc):
+            raise ScraperUnavailableError(
+                f"scraper unavailable for @{handle}: {exc}") from exc
         log.error("fetch_source failed for @%s: %s", handle, exc)
         return []
 

@@ -18,6 +18,15 @@ from pipeline import fetch
 
 
 class FetchApiTest(unittest.IsolatedAsyncioTestCase):
+    async def test_http_403_is_scraper_unavailable(self):
+        api = Mock()
+        api.user_by_login = AsyncMock(
+            side_effect=Exception("HttpStatusError 403; queue=UserByScreenName"))
+
+        with patch.object(fetch, "_get_api", AsyncMock(return_value=api)):
+            with self.assertRaises(fetch.ScraperUnavailableError):
+                await fetch._fetch_async("alice")
+
     async def test_cookie_api_uses_bounded_wait_and_requires_an_account(self):
         api = Mock()
         api.pool.add_account = AsyncMock()

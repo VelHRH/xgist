@@ -17,7 +17,8 @@ from .config import (DEFAULT_TZ, MAX_TWEET_AGE_HOURS, THREAD_MEDIA_CAP,
                      TMP_DIR, load_feedback, load_promo, load_state, load_users,
                      load_whitelist, refund_thread_quota, save_user, save_user_state,
                      should_alert)
-from .fetch import AuthError, SourceReadError, fetch_source, fetch_thread
+from .fetch import (AuthError, ScraperUnavailableError, SourceReadError,
+                    fetch_source, fetch_thread)
 from .media import prepare
 from .plans import apply_plan, resolve_plan
 from .rank import engagement, pick_top
@@ -70,6 +71,17 @@ def _alert_fetch_broken(sources: int) -> None:
         )
 
 
+def _alert_scraper_unavailable() -> None:
+    log.warning("X rejected the scraper request with HTTP 403")
+    if should_alert("scraper_unavailable", 6 * 3600):
+        _alert_admin(
+            "🛑 XGist: X rejected the scraper request (HTTP 403), and the "
+            "twscrape account is temporarily unavailable. Digests will retry "
+            "automatically.\n\nCheck the X account/session restrictions, "
+            "cookies, and https://github.com/vladkens/twscrape/issues."
+        )
+
+
 # GitHub's hourly cron fires late or skips slots entirely, so scheduled hours
 # remain due long enough to recover after an extended X outage.
 CATCH_UP_HOURS = MAX_TWEET_AGE_HOURS
@@ -109,6 +121,24 @@ def _due_slot(cfg: dict, user_state: dict, now: datetime) -> str | None:
             if slot >= confirmed and key > served:
                 return key
     return None
+
+
+def _delayed_digest_label(slot: str | None, now: datetime,
+                          tz: ZoneInfo) -> str | None:
+    if not slot:
+        return None
+    try:
+        scheduled = datetime.strptime(slot, "%Y-%m-%d %H").replace(tzinfo=tz)
+    except ValueError:
+        return None
+    local = now.astimezone(tz)
+    if scheduled.strftime("%Y-%m-%d %H") == local.strftime("%Y-%m-%d %H"):
+        return None
+    return (
+        "⏱ <b>Delayed Digest</b>\nScheduled for "
+        f"{scheduled.strftime('%Y-%m-%d · %H:00 %Z')} · delivered now after "
+        "a temporary delay."
+    )
 
 
 # Tweets posted shortly before the previous digest get a second look — their
@@ -303,6 +333,9 @@ def main() -> None:
         except AuthError:
             _alert_cookie_expiry()
             return
+        except ScraperUnavailableError:
+            _alert_scraper_unavailable()
+            return
         except SourceReadError as exc:
             failed_sources.add(s)
             log.warning("source read failed for @%s: %s", s, exc)
@@ -354,6 +387,16 @@ def main() -> None:
             except Exception:
                 log.exception("failed to prepare tweet %s for user %s", tweet["id"], uid)
 
+        first_digest = not user_state.get("last_digest_at")
+        tz = ZoneInfo(cfg.get("timezone") or DEFAULT_TZ)
+        delayed_label = _delayed_digest_label(
+            slots.get(uid) if not force_user else None, now, tz)
+        if delayed_label and (prepared or first_digest or cfg.get("notify_empty")):
+            try:
+                tg.send_text(int(uid), delayed_label)
+            except Exception:
+                log.exception("failed to send delayed Digest label to user %s", uid)
+
         if prepared and cfg["_plan"]["tier"] == "pro":
             count = len(cfg["sources"])
             try:
@@ -388,7 +431,6 @@ def main() -> None:
             except Exception:
                 log.exception("failed to preview tweet %s for user %s", tweet["id"], uid)
 
-        first_digest = not user_state.get("last_digest_at")
         if not prepared and cfg.get("sources") and first_digest:
             try:
                 heading = ("⭐ <b>XGist Pro · Your first briefing is complete</b>"
@@ -411,7 +453,6 @@ def main() -> None:
             except Exception:
                 log.exception("failed to notify user %s", uid)
 
-        tz = ZoneInfo(cfg.get("timezone") or DEFAULT_TZ)
         # Record the *slot* served (not the wall-clock hour), so a late run
         # that catches up a missed hour doesn't block the next scheduled one.
         user_state["last_run_hour"] = (

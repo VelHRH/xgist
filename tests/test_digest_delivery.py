@@ -54,6 +54,7 @@ class DigestHarness:
         self.events = []
         self.user_saves = []
         self.fetched_sources = []
+        self.alerts = []
         self.next_message_id = 1
 
     def fetch_source(self, source):
@@ -88,11 +89,11 @@ class DigestHarness:
         self.users[uid] = saved
         self.user_saves.append((uid, saved))
 
-    def run(self, force_user=""):
+    def run(self, force_user="", force_all=True):
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(os.environ, {
                 "ADMIN_ID": "",
-                "FORCE_ALL": "1",
+                "FORCE_ALL": "1" if force_all else "",
                 "FORCE_USER": force_user,
                 "THREAD_URL": "",
             }), patch.multiple(
@@ -109,6 +110,7 @@ class DigestHarness:
                 pick_top=lambda candidates, cfg: candidates,
                 save_user=self.save_user,
                 save_user_state=self.save_state,
+                _alert_admin=self.alerts.append,
             ), patch.object(digest.tg, "send_preview", self.send_preview), \
                     patch.object(digest.tg, "send_controls", self.send_controls), \
                     patch.object(digest.tg, "send_text", self.send_text), \
@@ -119,6 +121,74 @@ class DigestHarness:
 
 
 class DigestDeliveryTest(unittest.TestCase):
+    def test_delayed_digest_is_labeled_before_delivery(self):
+        now = datetime.now(timezone.utc)
+        scheduled = now - timedelta(hours=2)
+        harness = DigestHarness(
+            users={"1": timezone_confirmed({
+                "channel": None,
+                "sources": ["alice"],
+                "hours": [scheduled.hour],
+                "timezone": "UTC",
+            })},
+            state={"1": {
+                "last_run_hour": (scheduled - timedelta(days=1)).strftime("%Y-%m-%d %H"),
+            }},
+            fetched={"alice": [tweet(now - timedelta(hours=1))]},
+        )
+
+        harness.run(force_all=False)
+
+        self.assertEqual(harness.events[0][0], "text")
+        self.assertIn("Delayed Digest", harness.events[0][2])
+        self.assertIn(scheduled.strftime("%Y-%m-%d · %H:00 UTC"),
+                      harness.events[0][2])
+        self.assertEqual(harness.events[1][0], "preview")
+
+    def test_on_time_digest_is_not_labeled_as_delayed(self):
+        now = datetime.now(timezone.utc)
+        harness = DigestHarness(
+            users={"1": timezone_confirmed({
+                "channel": None,
+                "sources": ["alice"],
+                "hours": [now.hour],
+                "timezone": "UTC",
+            })},
+            state={"1": {
+                "last_run_hour": (now - timedelta(days=1)).strftime("%Y-%m-%d %H"),
+            }},
+            fetched={"alice": [tweet(now - timedelta(minutes=30))]},
+        )
+
+        harness.run(force_all=False)
+
+        self.assertEqual(harness.events[0][0], "preview")
+        self.assertFalse(any(
+            event[0] == "text" and "Delayed Digest" in event[2]
+            for event in harness.events
+        ))
+
+    def test_scraper_403_stops_immediately_with_precise_alert(self):
+        harness = DigestHarness(
+            users={"1": timezone_confirmed({
+                "channel": None,
+                "sources": ["alice", "bob"],
+                "hours": [9],
+            })},
+            state={},
+            fetched={
+                "alice": digest.ScraperUnavailableError("HttpStatusError 403"),
+                "bob": [],
+            },
+        )
+
+        harness.run()
+
+        self.assertEqual(harness.fetched_sources, ["alice"])
+        self.assertEqual(len(harness.alerts), 1)
+        self.assertIn("HTTP 403", harness.alerts[0])
+        self.assertNotIn("XClientTxId", harness.alerts[0])
+
     def test_all_source_failures_leave_slot_and_account_health_unchanged(self):
         now = datetime.now(timezone.utc)
         previous_state = {
