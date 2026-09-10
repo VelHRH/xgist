@@ -75,6 +75,7 @@ Repo → Settings → Secrets and variables → Actions → **New repository sec
 | `TELEGRAM_BOT_TOKEN` | from BotFather |
 | `ANTHROPIC_API_KEY` | from console.anthropic.com → API keys |
 | `TWITTER_COOKIES` | full content of the exported cookies.txt |
+| `TWS_PROXY` | authenticated residential/ISP proxy URL, for example `http://user:password@host:port` |
 | `UPSTASH_REDIS_REST_URL` | from step 4 |
 | `UPSTASH_REDIS_REST_TOKEN` | from step 4 |
 | `WEBHOOK_SECRET` | the same random value configured on the Worker |
