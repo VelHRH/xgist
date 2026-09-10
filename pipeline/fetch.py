@@ -261,8 +261,11 @@ def _viewer_page(handle: str, cursor: str = "") -> dict:
     try:
         payload = response.json()
     except ValueError as exc:
+        detail = response.text[:200].replace("\n", " ")
         raise ScraperUnavailableError(
-            f"twitter-viewer returned invalid data for @{handle}") from exc
+            f"twitter-viewer returned HTTP {response.status_code} "
+            f"{response.headers.get('content-type', '')!r} for @{handle}: "
+            f"{detail}") from exc
     if not isinstance(payload, dict):
         raise ScraperUnavailableError(
             f"twitter-viewer returned invalid data for @{handle}")
