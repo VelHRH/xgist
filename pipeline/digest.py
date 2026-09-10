@@ -68,7 +68,8 @@ def _alert_fetch_broken(sources: int) -> None:
 
 def _alert_scraper_unavailable(exc: Exception) -> None:
     strategy = os.getenv("X_FETCH_STRATEGY", "twitter-viewer")
-    log.warning("X data strategy %s is temporarily unavailable", strategy)
+    log.warning("X data strategy %s is temporarily unavailable: %s",
+                strategy, exc)
     if should_alert("scraper_unavailable", 6 * 3600):
         _alert_admin(
             f"🛑 XGist: X data strategy {strategy!r} is temporarily "
