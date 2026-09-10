@@ -91,7 +91,7 @@ class ValidateAccountTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {}, clear=True), \
                 patch.object(fetch, "_get_api", AsyncMock(
                     side_effect=AssertionError("validation used twscrape"))), \
-                patch.object(validate_account.requests, "get",
+                patch.object(fetch.curl_requests, "get",
                              return_value=response):
             self.assertEqual(await validate_account.validate("naval"), "readable")
 
@@ -103,7 +103,7 @@ class ValidateAccountTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"X_FETCH_STRATEGY": "twitter-viewer"}), \
                 patch.object(fetch, "_get_api", AsyncMock(
                     side_effect=AssertionError("validation used twscrape"))), \
-                patch.object(validate_account.requests, "get",
+                patch.object(fetch.curl_requests, "get",
                              return_value=response):
             self.assertEqual(await validate_account.validate("naval"), "protected")
 

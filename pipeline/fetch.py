@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 
 import requests
 import twscrape
+from curl_cffi import requests as curl_requests
+from curl_cffi.requests.exceptions import RequestException as CurlRequestException
 
 from .config import FETCH_RANGE, THREAD_MEDIA_CAP, TMP_DIR
 from .thread import build_chain, parse_tweet_id
@@ -240,22 +242,15 @@ def _viewer_error(handle: str, response: requests.Response,
 
 
 def _viewer_page(handle: str, cursor: str = "") -> dict:
-    worker_url = os.getenv("WORKER_URL", "").rstrip("/")
-    webhook_secret = os.getenv("WEBHOOK_SECRET", "")
-    url = (f"{worker_url}/x-viewer/user-tweets"
-           if worker_url and webhook_secret
-           else f"{_VIEWER_URL}/user-tweets")
-    headers = dict(_VIEWER_HEADERS)
-    if worker_url and webhook_secret:
-        headers["x-telegram-bot-api-secret-token"] = webhook_secret
     try:
-        response = requests.get(
-            url,
+        response = curl_requests.get(
+            f"{_VIEWER_URL}/user-tweets",
             params={"username": handle.lower(), "cursor": cursor},
-            headers=headers,
+            headers=_VIEWER_HEADERS,
             timeout=30,
+            impersonate="chrome",
         )
-    except requests.RequestException as exc:
+    except CurlRequestException as exc:
         raise ScraperUnavailableError(
             f"twitter-viewer unavailable while fetching @{handle}: {exc}") from exc
     try:
