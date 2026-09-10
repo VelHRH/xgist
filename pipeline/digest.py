@@ -56,29 +56,23 @@ def _alert_cookie_expiry() -> None:
 
 
 def _alert_fetch_broken(sources: int) -> None:
-    """Every source resolved but returned nothing — X likely changed its
-    web bundle and twscrape can't build the transaction-id header. Distinct
-    from cookie expiry (which raises AuthError first)."""
     log.warning("fetch returned 0 tweets across all %d sources", sources)
     # Once per 6h so every due slot across the day doesn't re-ping.
     if should_alert("fetch_broken", 6 * 3600):
         _alert_admin(
-            "🛑 XGist: fetched all sources but got 0 tweets — X scraping is "
-            "broken (likely a twscrape XClientTxId breakage after an X "
-            "change), so digests are silently empty.\n\n"
-            "Check https://github.com/vladkens/twscrape/issues for a fix "
-            "release, then bump the pin in requirements.txt."
+            "🛑 XGist: the configured X data provider returned no posts for "
+            "every watched account, so digests are temporarily paused. "
+            "The next run will retry automatically."
         )
 
 
-def _alert_scraper_unavailable() -> None:
-    log.warning("X rejected the scraper request with HTTP 403")
+def _alert_scraper_unavailable(exc: Exception) -> None:
+    strategy = os.getenv("X_FETCH_STRATEGY", "twitter-viewer")
+    log.warning("X data strategy %s is temporarily unavailable", strategy)
     if should_alert("scraper_unavailable", 6 * 3600):
         _alert_admin(
-            "🛑 XGist: X rejected the scraper request (HTTP 403), and the "
-            "twscrape account is temporarily unavailable. Digests will retry "
-            "automatically.\n\nCheck the X account/session restrictions, "
-            "cookies, and https://github.com/vladkens/twscrape/issues."
+            f"🛑 XGist: X data strategy {strategy!r} is temporarily "
+            f"unavailable ({exc}). Digests will retry automatically."
         )
 
 
@@ -333,8 +327,8 @@ def main() -> None:
         except AuthError:
             _alert_cookie_expiry()
             return
-        except ScraperUnavailableError:
-            _alert_scraper_unavailable()
+        except ScraperUnavailableError as exc:
+            _alert_scraper_unavailable(exc)
             return
         except SourceReadError as exc:
             failed_sources.add(s)
@@ -351,7 +345,7 @@ def main() -> None:
     # A quiet account still has *some* recent posts in FETCH_RANGE, so zero
     # tweets across every source means fetching itself is broken, not a slow
     # news day. Alert and bail without advancing last_run_hour, so the next
-    # slot retries and the digest self-heals once twscrape works again.
+    # slot retries and the digest self-heals once fetching works again.
     if sources and not failed_sources and not any(fetched.values()):
         _alert_fetch_broken(len(sources))
         return

@@ -3,7 +3,7 @@ import os
 
 import requests
 
-from .fetch import _get_api
+from .fetch import validate_source
 
 
 def classify_error(exc: Exception) -> str:
@@ -22,15 +22,7 @@ def classify_error(exc: Exception) -> str:
 
 async def validate(handle: str) -> str:
     try:
-        api = await _get_api()
-        user = await api.user_by_login(handle)
-        if user is None:
-            return "nonexistent"
-        if getattr(user, "protected", False):
-            return "protected"
-        async for _ in api.user_tweets(user.id, limit=1):
-            break
-        return "readable"
+        return await validate_source(handle)
     except Exception as exc:
         return classify_error(exc)
 

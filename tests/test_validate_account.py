@@ -15,8 +15,22 @@ except ModuleNotFoundError:
     twscrape.MediaVideo = object
     sys.modules["twscrape"] = twscrape
 
-from pipeline import validate_account
+from pipeline import fetch, validate_account
 from pipeline.fetch import _auth_failure
+
+
+class ViewerResponse:
+    def __init__(self, payload, status_code=200):
+        self.payload = payload
+        self.status_code = status_code
+
+    def json(self):
+        return self.payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise validate_account.requests.HTTPError(
+                f"HTTP {self.status_code}", response=self)
 
 
 class FakeApi:
@@ -40,7 +54,8 @@ class FakeApi:
 
 class ValidateAccountTest(unittest.IsolatedAsyncioTestCase):
     async def outcome(self, api):
-        with patch.object(validate_account, "_get_api", AsyncMock(return_value=api)):
+        with patch.dict(os.environ, {"X_FETCH_STRATEGY": "x-direct"}), \
+                patch.object(fetch, "_get_api", AsyncMock(return_value=api)):
             return await validate_account.validate("naval")
 
     async def test_existing_public_account_is_readable_even_without_posts(self):
@@ -65,6 +80,33 @@ class ValidateAccountTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unreadable, "unreadable")
         self.assertEqual(transient, "transient")
 
+    async def test_default_strategy_validates_through_twitter_viewer(self):
+        response = ViewerResponse({
+            "success": True,
+            "data": {
+                "user": {"handle": "naval", "protected": False},
+                "tweets": [],
+            },
+        })
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(fetch, "_get_api", AsyncMock(
+                    side_effect=AssertionError("validation used twscrape"))), \
+                patch.object(validate_account.requests, "get",
+                             return_value=response):
+            self.assertEqual(await validate_account.validate("naval"), "readable")
+
+    async def test_viewer_protected_source_validates_as_protected(self):
+        response = ViewerResponse({
+            "success": False,
+            "error": "Account is protected",
+        }, 403)
+        with patch.dict(os.environ, {"X_FETCH_STRATEGY": "twitter-viewer"}), \
+                patch.object(fetch, "_get_api", AsyncMock(
+                    side_effect=AssertionError("validation used twscrape"))), \
+                patch.object(validate_account.requests, "get",
+                             return_value=response):
+            self.assertEqual(await validate_account.validate("naval"), "protected")
+
 
 class FetchFailureClassificationTest(unittest.TestCase):
     def test_only_session_wide_403_failures_abort_all_sources(self):
@@ -84,7 +126,8 @@ class ValidateAccountMainTest(unittest.TestCase):
             "FORCE_USER": "123",
             "WORKER_URL": "https://worker.test",
             "WEBHOOK_SECRET": "secret",
-        }), patch.object(validate_account, "_get_api", AsyncMock(return_value=
+            "X_FETCH_STRATEGY": "x-direct",
+        }), patch.object(fetch, "_get_api", AsyncMock(return_value=
                 FakeApi(user=SimpleNamespace(id=1, protected=False)))), \
                 patch.object(validate_account.requests, "post", return_value=response) as post:
             validate_account.main()

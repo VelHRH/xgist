@@ -61,6 +61,7 @@ jobs:
           TWITTER_COOKIES: ${{ secrets.TWITTER_COOKIES }}
           TWITTER_USERNAME: ${{ secrets.TWITTER_USERNAME }}
           TWS_PROXY: ${{ secrets.TWS_PROXY }}
+          X_FETCH_STRATEGY: ${{ vars.X_FETCH_STRATEGY || 'twitter-viewer' }}
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
           ADMIN_ID: ${{ vars.ADMIN_ID }}

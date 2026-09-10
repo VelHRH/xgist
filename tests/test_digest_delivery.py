@@ -186,7 +186,7 @@ class DigestDeliveryTest(unittest.TestCase):
 
         self.assertEqual(harness.fetched_sources, ["alice"])
         self.assertEqual(len(harness.alerts), 1)
-        self.assertIn("HTTP 403", harness.alerts[0])
+        self.assertIn("403", harness.alerts[0])
         self.assertNotIn("XClientTxId", harness.alerts[0])
 
     def test_all_source_failures_leave_slot_and_account_health_unchanged(self):

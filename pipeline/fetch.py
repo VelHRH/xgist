@@ -1,9 +1,11 @@
-"""Fetch recent tweets via twscrape using cookie-based auth (no login flow)."""
+"""Fetch recent tweets and threads from X."""
 
 import asyncio
 import logging
 import os
+from email.utils import parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 import twscrape
@@ -15,7 +17,10 @@ log = logging.getLogger(__name__)
 
 _DB = Path("accounts.db")
 _api: twscrape.API | None = None
+_api_proxy: str | None = None
 _cookie_str: str = ""
+_VIEWER_URL = "https://www.twitter-viewer.com/api/x"
+_VIEWER_HEADERS = {"User-Agent": "XGist/1.0"}
 
 
 def _parse_cookies(raw: str) -> str:
@@ -38,9 +43,13 @@ def _parse_cookies(raw: str) -> str:
     return f"auth_token={auth_token}; ct0={ct0}"
 
 
-async def _get_api() -> twscrape.API:
-    global _api, _cookie_str
-    if _api is not None:
+async def _get_api(proxy: str | None = None) -> twscrape.API:
+    global _api, _api_proxy, _cookie_str
+    if proxy is None and os.getenv("X_FETCH_STRATEGY", "").strip().lower() == "x-proxy":
+        proxy = os.getenv("TWS_PROXY", "").strip()
+        if not proxy:
+            raise ValueError("X_FETCH_STRATEGY=x-proxy requires TWS_PROXY")
+    if _api is not None and _api_proxy == proxy:
         return _api
 
     api = twscrape.API(
@@ -53,13 +62,16 @@ async def _get_api() -> twscrape.API:
 
     if cookies_raw:
         _cookie_str = _parse_cookies(cookies_raw)
-        await api.pool.add_account(
-            username=username,
-            password="n/a",
-            email="n/a",
-            email_password="",
-            cookies=_cookie_str,
-        )
+        account = {
+            "username": username,
+            "password": "n/a",
+            "email": "n/a",
+            "email_password": "",
+            "cookies": _cookie_str,
+        }
+        if proxy:
+            account["proxy"] = proxy
+        await api.pool.add_account(**account)
         # login_all activates the account via cookie verification (not the
         # login form), so it works even from GitHub Actions IPs.
         await api.pool.login_all()
@@ -70,10 +82,15 @@ async def _get_api() -> twscrape.API:
             raise RuntimeError(
                 "Set TWITTER_COOKIES (preferred) or TWITTER_USERNAME+PASSWORD+EMAIL"
             )
-        await api.pool.add_account(username, password, email, email)
+        if proxy:
+            await api.pool.add_account(username, password, email, email,
+                                       proxy=proxy)
+        else:
+            await api.pool.add_account(username, password, email, email)
         await api.pool.login_all()
 
     _api = api
+    _api_proxy = proxy
     return _api
 
 
@@ -143,8 +160,8 @@ def _scraper_unavailable(exc: Exception) -> bool:
     return "403" in message or "no account available" in message
 
 
-async def _fetch_async(handle: str) -> list[dict]:
-    api = await _get_api()
+async def _fetch_async(handle: str, proxy: str | None = None) -> list[dict]:
+    api = await _get_api(proxy)
     try:
         user = await api.user_by_login(handle)
     except Exception as exc:
@@ -188,11 +205,9 @@ async def _fetch_async(handle: str) -> list[dict]:
     return tweets
 
 
-def fetch_source(handle: str) -> list[dict]:
-    """Fetch recent tweets for one account. Returns tweets, newest first.
-    Raises AuthError if the session appears invalid (cookies expired)."""
+def _fetch_with_twscrape(handle: str, proxy: str | None = None) -> list[dict]:
     try:
-        return asyncio.get_event_loop().run_until_complete(_fetch_async(handle))
+        return asyncio.get_event_loop().run_until_complete(_fetch_async(handle, proxy))
     except AuthError:
         raise
     except ScraperUnavailableError:
@@ -207,6 +222,211 @@ def fetch_source(handle: str) -> list[dict]:
                 f"scraper unavailable for @{handle}: {exc}") from exc
         log.error("fetch_source failed for @%s: %s", handle, exc)
         return []
+
+
+def _viewer_error(handle: str, response: requests.Response,
+                  payload: dict | None) -> None:
+    message = str((payload or {}).get("error") or f"HTTP {response.status_code}")
+    lowered = message.lower()
+    if response.status_code == 404 or "not found" in lowered or "does not exist" in lowered:
+        raise SourceReadError(f"@{handle} not found: {message}")
+    if "protected" in lowered or "private" in lowered:
+        raise SourceReadError(f"@{handle} is protected: {message}")
+    if response.status_code in (401, 403, 429) or response.status_code >= 500:
+        raise ScraperUnavailableError(
+            f"twitter-viewer unavailable while fetching @{handle}: {message}")
+    if response.status_code >= 400 or not (payload or {}).get("success"):
+        raise SourceReadError(f"could not read @{handle}: {message}")
+
+
+def _viewer_page(handle: str, cursor: str = "") -> dict:
+    try:
+        response = requests.get(
+            f"{_VIEWER_URL}/user-tweets",
+            params={"username": handle.lower(), "cursor": cursor},
+            headers=_VIEWER_HEADERS,
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        raise ScraperUnavailableError(
+            f"twitter-viewer unavailable while fetching @{handle}: {exc}") from exc
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ScraperUnavailableError(
+            f"twitter-viewer returned invalid data for @{handle}") from exc
+    if not isinstance(payload, dict):
+        raise ScraperUnavailableError(
+            f"twitter-viewer returned invalid data for @{handle}")
+    if response.status_code >= 400 or not payload.get("success"):
+        _viewer_error(handle, response, payload)
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("tweets"), list):
+        raise ScraperUnavailableError(
+            f"twitter-viewer returned invalid data for @{handle}")
+    return data
+
+
+def _download_viewer_media(tweet_id: str, media: list[dict],
+                           dest: Path) -> list[str]:
+    items: list[tuple[str, str]] = []
+    for i, item in enumerate(media):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "photo" and item.get("url"):
+            url = item["url"].split("?")[0] + "?format=jpg&name=large"
+            if urlparse(url).hostname == "pbs.twimg.com":
+                items.append((url, f"photo_{i}.jpg"))
+        elif item.get("videoUrl"):
+            url = item["videoUrl"]
+            if urlparse(url).hostname == "video.twimg.com":
+                items.append((url, f"video_{i}.mp4"))
+
+    paths: list[str] = []
+    for url, name in items[:4]:
+        out = dest / f"{tweet_id}_{name}"
+        try:
+            response = requests.get(url, headers=_DL_HEADERS, timeout=60)
+            response.raise_for_status()
+            out.write_bytes(response.content)
+            paths.append(str(out))
+        except Exception as exc:
+            log.warning("failed to download %s: %s", url, exc)
+    return paths
+
+
+def _fetch_with_viewer(handle: str) -> list[dict]:
+    dest = TMP_DIR / handle.lower()
+    dest.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+    seen: set[str] = set()
+    cursor = ""
+    pages = 0
+    max_pages = max(1, (FETCH_RANGE + 19) // 20 + 2)
+
+    while len(rows) < FETCH_RANGE and pages < max_pages:
+        data = _viewer_page(handle, cursor)
+        pages += 1
+        user = data.get("user") or {}
+        if user.get("protected"):
+            raise SourceReadError(f"@{handle} is protected")
+        for item in data["tweets"]:
+            tweet_id = str(item.get("id") or "")
+            if not tweet_id or tweet_id in seen or item.get("isRetweet"):
+                continue
+            try:
+                date = parsedate_to_datetime(item["createdAt"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ScraperUnavailableError(
+                    f"twitter-viewer returned an invalid date for @{handle}") from exc
+            seen.add(tweet_id)
+            stats = item.get("stats") or {}
+            media_paths = _download_viewer_media(
+                tweet_id, item.get("media") or [], dest)
+            rows.append({
+                "id": tweet_id,
+                "source": handle.lower(),
+                "text": item.get("text") or "",
+                "date": date,
+                "favorites": stats.get("likes") or 0,
+                "retweets": stats.get("retweets") or 0,
+                "replies": stats.get("replies") or 0,
+                "media": media_paths,
+            })
+            if len(rows) >= FETCH_RANGE:
+                break
+        pagination = data.get("pagination") or {}
+        next_cursor = pagination.get("nextCursor")
+        if not pagination.get("hasMore") or not next_cursor or next_cursor == cursor:
+            break
+        cursor = next_cursor
+
+    rows.sort(key=lambda tweet: tweet["date"], reverse=True)
+    return rows[:FETCH_RANGE]
+
+
+class XDataStrategy:
+    def fetch_source(self, handle: str) -> list[dict]:
+        raise NotImplementedError
+
+    async def validate(self, handle: str) -> str:
+        raise NotImplementedError
+
+
+class DirectXStrategy(XDataStrategy):
+    def fetch_source(self, handle: str) -> list[dict]:
+        return _fetch_with_twscrape(handle)
+
+    async def validate(self, handle: str) -> str:
+        return await _validate_with_twscrape(handle)
+
+
+class ProxyXStrategy(XDataStrategy):
+    def __init__(self) -> None:
+        self.proxy = os.getenv("TWS_PROXY", "").strip()
+        if not self.proxy:
+            raise ValueError("X_FETCH_STRATEGY=x-proxy requires TWS_PROXY")
+
+    def fetch_source(self, handle: str) -> list[dict]:
+        return _fetch_with_twscrape(handle, self.proxy)
+
+    async def validate(self, handle: str) -> str:
+        return await _validate_with_twscrape(handle, self.proxy)
+
+
+class TwitterViewerStrategy(XDataStrategy):
+    def fetch_source(self, handle: str) -> list[dict]:
+        return _fetch_with_viewer(handle)
+
+    async def validate(self, handle: str) -> str:
+        try:
+            data = _viewer_page(handle)
+            if (data.get("user") or {}).get("protected"):
+                return "protected"
+            return "readable"
+        except SourceReadError as exc:
+            message = str(exc).lower()
+            if "not found" in message or "does not exist" in message:
+                return "nonexistent"
+            if "protected" in message or "private" in message:
+                return "protected"
+            return "unreadable"
+        except ScraperUnavailableError:
+            return "transient"
+
+
+def _strategy() -> XDataStrategy:
+    name = os.getenv("X_FETCH_STRATEGY", "twitter-viewer").strip().lower()
+    strategies = {
+        "twitter-viewer": TwitterViewerStrategy,
+        "x-direct": DirectXStrategy,
+        "x-proxy": ProxyXStrategy,
+    }
+    if name not in strategies:
+        choices = ", ".join(strategies)
+        raise ValueError(f"unknown X_FETCH_STRATEGY {name!r}; choose {choices}")
+    return strategies[name]()
+
+
+def fetch_source(handle: str) -> list[dict]:
+    return _strategy().fetch_source(handle)
+
+
+async def validate_source(handle: str) -> str:
+    return await _strategy().validate(handle)
+
+
+async def _validate_with_twscrape(handle: str,
+                                  proxy: str | None = None) -> str:
+    api = await _get_api(proxy)
+    user = await api.user_by_login(handle)
+    if user is None:
+        return "nonexistent"
+    if getattr(user, "protected", False):
+        return "protected"
+    async for _ in api.user_tweets(user.id, limit=1):
+        break
+    return "readable"
 
 
 def _thread_tweet_dict(tw: "twscrape.Tweet") -> dict:
@@ -229,7 +449,12 @@ async def _fetch_thread_async(url: str) -> dict:
     tid = parse_tweet_id(url)
     if not tid:
         raise ValueError(f"not a tweet URL: {url!r}")
-    api = await _get_api()
+    strategy = os.getenv("X_FETCH_STRATEGY", "twitter-viewer").strip().lower()
+    proxy = (None if strategy == "x-direct"
+             else os.getenv("TWS_PROXY", "").strip() or None)
+    if strategy == "x-proxy" and not proxy:
+        raise ValueError("X_FETCH_STRATEGY=x-proxy requires TWS_PROXY")
+    api = await _get_api(proxy)
 
     linked = await api.tweet_details(int(tid))
     if linked is None:

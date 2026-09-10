@@ -80,8 +80,11 @@ Repo → Settings → Secrets and variables → Actions → **New repository sec
 | `UPSTASH_REDIS_REST_TOKEN` | from step 4 |
 | `WEBHOOK_SECRET` | the same random value configured on the Worker |
 
-Under *Variables*, set `WORKER_URL` to the deployed Worker URL. Optionally set
-`DEFAULT_TZ` (default is `Europe/Kyiv`).
+Under *Variables*, set `WORKER_URL` to the deployed Worker URL and
+`X_FETCH_STRATEGY` to `twitter-viewer`, `x-direct`, or `x-proxy`. Optionally
+set `DEFAULT_TZ` (default is `Europe/Kyiv`). `twitter-viewer` is the default.
+Pasted-thread reconstruction still uses the X session because Twitter Viewer
+does not expose thread relationships; it uses `TWS_PROXY` when configured.
 
 ### 6. Create a GitHub token for the Worker
 
