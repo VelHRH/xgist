@@ -2903,6 +2903,35 @@ async function serveSite(request, env) {
   const url = new URL(request.url);
   const origin = url.origin;
 
+  if (url.pathname.startsWith("/x-viewer/")) {
+    if (request.headers.get("x-telegram-bot-api-secret-token") !== env.WEBHOOK_SECRET) {
+      return new Response("forbidden", { status: 403 });
+    }
+    if (url.pathname !== "/x-viewer/user-tweets") {
+      return new Response("not found", { status: 404 });
+    }
+    const target = new URL("https://www.twitter-viewer.com/api/x/user-tweets");
+    for (const name of ["username", "cursor"]) {
+      if (url.searchParams.has(name)) {
+        target.searchParams.set(name, url.searchParams.get(name));
+      }
+    }
+    const upstream = await fetch(target, {
+      headers: {
+        "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        accept: "application/json",
+        referer: "https://www.twitter-viewer.com/",
+      },
+    });
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: {
+        "content-type": upstream.headers.get("content-type") || "application/json",
+      },
+    });
+  }
+
   // One-time setup: registers the "/" command autocomplete with Telegram.
   if (url.pathname === "/setup-commands") {
     if (url.searchParams.get("key") !== env.WEBHOOK_SECRET) {

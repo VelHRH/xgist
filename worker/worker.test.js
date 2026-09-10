@@ -190,6 +190,23 @@ async function sendUpdateAt(harness, update, now, overrides = {}) {
   }
 }
 
+async function requestViewerRelay(path, headers = {}, upstreamResponse =
+  new Response("upstream")) {
+  const calls = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    return upstreamResponse;
+  };
+  try {
+    const response = await worker.fetch(
+      new Request(`https://worker.test${path}`, { headers }), env(), {});
+    return { response, calls };
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+}
+
 async function sendScheduledAt(harness, now, overrides = {}) {
   const previousFetch = globalThis.fetch;
   const previousNow = Date.now;
@@ -296,6 +313,40 @@ function sentTo(harness, id) {
     .filter(({ method, params }) => method === "sendMessage" && params.chat_id === id)
     .map(({ params }) => params.text);
 }
+
+test("X Viewer relay rejects missing or invalid secrets without upstream access", async () => {
+  for (const headers of [{}, { "x-telegram-bot-api-secret-token": "wrong" }]) {
+    const { response, calls } = await requestViewerRelay(
+      "/x-viewer/user-tweets?username=alice", headers);
+    assert.equal(response.status, 403);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test("X Viewer relay forwards only the supported query and preserves upstream response", async () => {
+  const upstream = new Response('{"success":true}', {
+    status: 206,
+    headers: { "content-type": "application/json" },
+  });
+  const { response, calls } = await requestViewerRelay(
+    "/x-viewer/user-tweets?username=alice&cursor=cursor-1&ignored=drop",
+    { "x-telegram-bot-api-secret-token": "secret" }, upstream);
+
+  assert.equal(response.status, 206);
+  assert.equal(response.headers.get("content-type"), "application/json");
+  assert.equal(await response.text(), '{"success":true}');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url,
+    "https://www.twitter-viewer.com/api/x/user-tweets?username=alice&cursor=cursor-1");
+});
+
+test("X Viewer relay rejects unsupported routes without upstream access", async () => {
+  const { response, calls } = await requestViewerRelay(
+    "/x-viewer/profile?username=alice",
+    { "x-telegram-bot-api-secret-token": "secret" });
+  assert.equal(response.status, 404);
+  assert.equal(calls.length, 0);
+});
 
 test("a promotional trial is granted before the first welcome", async () => {
   const harness = createHarness();

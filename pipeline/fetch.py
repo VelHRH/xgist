@@ -240,11 +240,19 @@ def _viewer_error(handle: str, response: requests.Response,
 
 
 def _viewer_page(handle: str, cursor: str = "") -> dict:
+    worker_url = os.getenv("WORKER_URL", "").rstrip("/")
+    webhook_secret = os.getenv("WEBHOOK_SECRET", "")
+    url = (f"{worker_url}/x-viewer/user-tweets"
+           if worker_url and webhook_secret
+           else f"{_VIEWER_URL}/user-tweets")
+    headers = dict(_VIEWER_HEADERS)
+    if worker_url and webhook_secret:
+        headers["x-telegram-bot-api-secret-token"] = webhook_secret
     try:
         response = requests.get(
-            f"{_VIEWER_URL}/user-tweets",
+            url,
             params={"username": handle.lower(), "cursor": cursor},
-            headers=_VIEWER_HEADERS,
+            headers=headers,
             timeout=30,
         )
     except requests.RequestException as exc:

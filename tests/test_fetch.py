@@ -192,6 +192,30 @@ class TwitterViewerFetchTest(unittest.TestCase):
         self.assertIn("twitter-viewer.com/api/x/user-tweets", timeline_call.args[0])
         self.assertEqual(timeline_call.kwargs["params"]["username"], "alice")
 
+    def test_viewer_strategy_uses_signed_worker_relay_when_configured(self):
+        payload = self.viewer_payload()
+        payload["data"]["tweets"] = [payload["data"]["tweets"][2]]
+        payload["data"]["tweets"][0]["media"] = []
+        timeline = ViewerResponse(payload)
+
+        with patch.dict(os.environ, {
+            "X_FETCH_STRATEGY": "twitter-viewer",
+            "WORKER_URL": "https://worker.test",
+            "WEBHOOK_SECRET": "relay-secret",
+        }, clear=True), \
+                patch.object(fetch, "TMP_DIR", self.tmp_path), \
+                patch.object(fetch.requests, "get", return_value=timeline) as get:
+            result = fetch.fetch_source("Alice")
+
+        self.assertEqual([tweet["id"] for tweet in result], ["new"])
+        self.assertEqual(get.call_args.args[0],
+                         "https://worker.test/x-viewer/user-tweets")
+        self.assertEqual(get.call_args.kwargs["params"], {
+            "username": "alice", "cursor": "",
+        })
+        self.assertEqual(get.call_args.kwargs["headers"][
+            "x-telegram-bot-api-secret-token"], "relay-secret")
+
     def test_viewer_rate_limit_is_scraper_unavailable(self):
         with patch.dict(os.environ, {"X_FETCH_STRATEGY": "twitter-viewer"}), \
                 patch.object(fetch.requests, "get", return_value=ViewerResponse(
