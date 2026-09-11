@@ -1,8 +1,10 @@
 """Fetch recent tweets and threads from X."""
 
 import asyncio
+import ipaddress
 import logging
 import os
+import random
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -23,6 +25,17 @@ _api_proxy: str | None = None
 _cookie_str: str = ""
 _VIEWER_URL = "https://www.twitter-viewer.com/api/x"
 _VIEWER_HEADERS = {"User-Agent": "XGist/1.0"}
+_PROXY_LIST_URL = "https://api.proxyscrape.com/v4/free-proxy-list/get"
+_PROXY_LIST_PARAMS = {
+    "request": "getproxies",
+    "protocol": "http",
+    "ssl": "yes",
+    "anonymity": "elite",
+    "timeout": "3000",
+    "country": "all",
+}
+_free_proxy_pool: tuple[str, ...] | None = None
+_free_proxy: str | None = None
 
 
 def _parse_cookies(raw: str) -> str:
@@ -241,14 +254,20 @@ def _viewer_error(handle: str, response: requests.Response,
         raise SourceReadError(f"could not read @{handle}: {message}")
 
 
-def _viewer_page(handle: str, cursor: str = "") -> dict:
+def _viewer_page(handle: str, cursor: str = "",
+                 proxy: str | None = None) -> dict:
+    kwargs = {
+        "params": {"username": handle.lower(), "cursor": cursor},
+        "headers": _VIEWER_HEADERS,
+        "timeout": 30,
+        "impersonate": "chrome",
+    }
+    if proxy:
+        kwargs["proxy"] = proxy
     try:
         response = curl_requests.get(
             f"{_VIEWER_URL}/user-tweets",
-            params={"username": handle.lower(), "cursor": cursor},
-            headers=_VIEWER_HEADERS,
-            timeout=30,
-            impersonate="chrome",
+            **kwargs,
         )
     except CurlRequestException as exc:
         raise ScraperUnavailableError(
@@ -271,6 +290,68 @@ def _viewer_page(handle: str, cursor: str = "") -> dict:
         raise ScraperUnavailableError(
             f"twitter-viewer returned invalid data for @{handle}")
     return data
+
+
+def _load_free_proxies() -> tuple[str, ...]:
+    global _free_proxy_pool
+    if _free_proxy_pool is not None:
+        return _free_proxy_pool
+    try:
+        response = curl_requests.get(
+            _PROXY_LIST_URL,
+            params=_PROXY_LIST_PARAMS,
+            timeout=20,
+            impersonate="chrome",
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        raise ScraperUnavailableError(
+            f"free proxy list unavailable: {exc}") from exc
+
+    proxies: list[str] = []
+    for line in response.text.splitlines():
+        value = line.strip()
+        try:
+            host, port_raw = value.rsplit(":", 1)
+            address = ipaddress.ip_address(host)
+            port = int(port_raw)
+            if address.version != 4 or not 1 <= port <= 65535:
+                continue
+        except (ValueError, TypeError):
+            continue
+        proxies.append(f"http://{address}:{port}")
+    random.shuffle(proxies)
+    if not proxies:
+        raise ScraperUnavailableError("free proxy list returned no valid proxies")
+    _free_proxy_pool = tuple(proxies)
+    return _free_proxy_pool
+
+
+def _free_proxy_page(handle: str, cursor: str = "") -> dict:
+    global _free_proxy, _free_proxy_pool
+    pool = _load_free_proxies()
+    candidates = ([] if _free_proxy is None else [_free_proxy])
+    candidates.extend(proxy for proxy in pool if proxy != _free_proxy)
+    last_error: ScraperUnavailableError | None = None
+    for proxy in candidates[:5]:
+        try:
+            data = _viewer_page(handle, cursor, proxy)
+            _free_proxy = proxy
+            return data
+        except SourceReadError:
+            _free_proxy = proxy
+            raise
+        except ScraperUnavailableError as exc:
+            last_error = exc
+            _free_proxy_pool = tuple(
+                item for item in (_free_proxy_pool or ()) if item != proxy)
+            if _free_proxy == proxy:
+                _free_proxy = None
+    if not _free_proxy_pool:
+        _free_proxy_pool = None
+    raise ScraperUnavailableError(
+        f"twitter-viewer unavailable through free proxies for @{handle}: "
+        f"{last_error or 'no proxy available'}") from last_error
 
 
 def _download_viewer_media(tweet_id: str, media: list[dict],
@@ -301,7 +382,7 @@ def _download_viewer_media(tweet_id: str, media: list[dict],
     return paths
 
 
-def _fetch_with_viewer(handle: str) -> list[dict]:
+def _fetch_with_viewer(handle: str, page_fetcher=_viewer_page) -> list[dict]:
     dest = TMP_DIR / handle.lower()
     dest.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
@@ -311,7 +392,7 @@ def _fetch_with_viewer(handle: str) -> list[dict]:
     max_pages = max(1, (FETCH_RANGE + 19) // 20 + 2)
 
     while len(rows) < FETCH_RANGE and pages < max_pages:
-        data = _viewer_page(handle, cursor)
+        data = page_fetcher(handle, cursor)
         pages += 1
         user = data.get("user") or {}
         if user.get("protected"):
@@ -385,26 +466,39 @@ class TwitterViewerStrategy(XDataStrategy):
         return _fetch_with_viewer(handle)
 
     async def validate(self, handle: str) -> str:
-        try:
-            data = _viewer_page(handle)
-            if (data.get("user") or {}).get("protected"):
-                return "protected"
-            return "readable"
-        except SourceReadError as exc:
-            message = str(exc).lower()
-            if "not found" in message or "does not exist" in message:
-                return "nonexistent"
-            if "protected" in message or "private" in message:
-                return "protected"
-            return "unreadable"
-        except ScraperUnavailableError:
-            return "transient"
+        return await _validate_with_viewer(handle, _viewer_page)
+
+
+class FreeProxyTwitterViewerStrategy(XDataStrategy):
+    def fetch_source(self, handle: str) -> list[dict]:
+        return _fetch_with_viewer(handle, _free_proxy_page)
+
+    async def validate(self, handle: str) -> str:
+        return await _validate_with_viewer(handle, _free_proxy_page)
+
+
+async def _validate_with_viewer(handle: str, page_fetcher) -> str:
+    try:
+        data = page_fetcher(handle)
+        if (data.get("user") or {}).get("protected"):
+            return "protected"
+        return "readable"
+    except SourceReadError as exc:
+        message = str(exc).lower()
+        if "not found" in message or "does not exist" in message:
+            return "nonexistent"
+        if "protected" in message or "private" in message:
+            return "protected"
+        return "unreadable"
+    except ScraperUnavailableError:
+        return "transient"
 
 
 def _strategy() -> XDataStrategy:
     name = os.getenv("X_FETCH_STRATEGY", "twitter-viewer").strip().lower()
     strategies = {
         "twitter-viewer": TwitterViewerStrategy,
+        "twitter-viewer-free-proxy": FreeProxyTwitterViewerStrategy,
         "x-direct": DirectXStrategy,
         "x-proxy": ProxyXStrategy,
     }

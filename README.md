@@ -81,8 +81,11 @@ Repo → Settings → Secrets and variables → Actions → **New repository sec
 | `WEBHOOK_SECRET` | the same random value configured on the Worker |
 
 Under *Variables*, set `WORKER_URL` to the deployed Worker URL and
-`X_FETCH_STRATEGY` to `twitter-viewer`, `x-direct`, or `x-proxy`. Optionally
-set `DEFAULT_TZ` (default is `Europe/Kyiv`). `twitter-viewer` is the default.
+`X_FETCH_STRATEGY` to `twitter-viewer`, `twitter-viewer-free-proxy`, `x-direct`,
+or `x-proxy`. Optionally set `DEFAULT_TZ` (default is `Europe/Kyiv`).
+`twitter-viewer` is the default. `twitter-viewer-free-proxy` gets public HTTP
+proxies from ProxyScrape and sends only Twitter Viewer API requests through
+them. Media downloads remain direct, and X cookies are never sent to them.
 Pasted-thread reconstruction still uses the X session because Twitter Viewer
 does not expose thread relationships; it uses `TWS_PROXY` when configured.
 

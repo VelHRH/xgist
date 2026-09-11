@@ -33,6 +33,19 @@ class ViewerResponse:
                 f"HTTP {self.status_code}", response=self)
 
 
+class ProxyListResponse:
+    def __init__(self, text, status_code=200):
+        self.text = text
+        self.status_code = status_code
+        self.content = text.encode()
+        self.headers = {"content-type": "text/plain"}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise validate_account.requests.HTTPError(
+                f"HTTP {self.status_code}", response=self)
+
+
 class FakeApi:
     def __init__(self, user=None, lookup_error=None, tweets=None, tweets_error=None):
         self.user = user
@@ -53,6 +66,22 @@ class FakeApi:
 
 
 class ValidateAccountTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        for name in (
+                "_free_proxy", "_free_proxies", "_free_proxy_pool",
+                "_free_proxy_index", "_free_proxy_cache"):
+            if not hasattr(fetch, name):
+                continue
+            value = getattr(fetch, name)
+            if isinstance(value, list):
+                value.clear()
+            elif isinstance(value, dict):
+                value.clear()
+            elif isinstance(value, int):
+                setattr(fetch, name, 0)
+            else:
+                setattr(fetch, name, None)
+
     async def outcome(self, api):
         with patch.dict(os.environ, {"X_FETCH_STRATEGY": "x-direct"}), \
                 patch.object(fetch, "_get_api", AsyncMock(return_value=api)):
@@ -106,6 +135,73 @@ class ValidateAccountTest(unittest.IsolatedAsyncioTestCase):
                 patch.object(fetch.curl_requests, "get",
                              return_value=response):
             self.assertEqual(await validate_account.validate("naval"), "protected")
+
+    async def test_free_proxy_strategy_validates_through_viewer_with_proxy(self):
+        responses = []
+
+        def get(url, **kwargs):
+            responses.append((url, kwargs))
+            if "proxyscrape.com" in url:
+                return ProxyListResponse("198.51.100.1:8080\n")
+            return ViewerResponse({
+                "success": True,
+                "data": {
+                    "user": {"handle": "naval", "protected": False},
+                    "tweets": [],
+                },
+            })
+
+        def requests_get(url, **kwargs):
+            if "proxyscrape.com" in url:
+                return get(url, **kwargs)
+            raise AssertionError("validation downloaded unexpected media")
+
+        with patch.dict(os.environ,
+                        {"X_FETCH_STRATEGY": "twitter-viewer-free-proxy"}), \
+                patch.object(fetch, "_get_api", AsyncMock(
+                    side_effect=AssertionError("validation used twscrape"))), \
+                patch.object(fetch.curl_requests, "get", side_effect=get), \
+                patch.object(fetch.requests, "get", side_effect=requests_get):
+            self.assertEqual(await validate_account.validate("naval"), "readable")
+
+        viewer_calls = [kwargs for url, kwargs in responses
+                        if "twitter-viewer.com" in url]
+        self.assertEqual(len(viewer_calls), 1)
+        self.assertEqual(viewer_calls[0]["proxy"], "http://198.51.100.1:8080")
+
+    async def test_free_proxy_strategy_reuses_proxy_for_validation_calls(self):
+        responses = []
+
+        def get(url, **kwargs):
+            responses.append((url, kwargs))
+            if "proxyscrape.com" in url:
+                return ProxyListResponse("198.51.100.1:8080\n203.0.113.5:3128\n")
+            return ViewerResponse({
+                "success": True,
+                "data": {
+                    "user": {"handle": "naval", "protected": False},
+                    "tweets": [],
+                },
+            })
+
+        def requests_get(url, **kwargs):
+            if "proxyscrape.com" in url:
+                return get(url, **kwargs)
+            raise AssertionError("validation downloaded unexpected media")
+
+        with patch.dict(os.environ,
+                        {"X_FETCH_STRATEGY": "twitter-viewer-free-proxy"}), \
+                patch.object(fetch.curl_requests, "get", side_effect=get), \
+                patch.object(fetch.requests, "get", side_effect=requests_get):
+            self.assertEqual(await validate_account.validate("naval"), "readable")
+            self.assertEqual(await validate_account.validate("another"), "readable")
+
+        list_calls = [url for url, _ in responses if "proxyscrape.com" in url]
+        viewer_calls = [kwargs for url, kwargs in responses
+                        if "twitter-viewer.com" in url]
+        self.assertEqual(len(list_calls), 1)
+        self.assertEqual(len(viewer_calls), 2)
+        self.assertEqual(viewer_calls[0]["proxy"], viewer_calls[1]["proxy"])
 
 
 class FetchFailureClassificationTest(unittest.TestCase):

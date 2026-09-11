@@ -35,6 +35,29 @@ class ViewerResponse:
                 f"HTTP {self.status_code}", response=self)
 
 
+class ProxyListResponse:
+    def __init__(self, text, status_code=200):
+        self.text = text
+        self.status_code = status_code
+        self.content = text.encode()
+        self.headers = {"content-type": "text/plain"}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise fetch.requests.HTTPError(
+                f"HTTP {self.status_code}", response=self)
+
+
+class InvalidJsonResponse(ViewerResponse):
+    def __init__(self, status_code=200):
+        super().__init__(None, status_code)
+        self.text = "not json"
+        self.headers = {"content-type": "text/html"}
+
+    def json(self):
+        raise ValueError("invalid json")
+
+
 def viewer_tweet(tweet_id, text, created_at, *, retweet=False, media=None,
                 likes=0, retweets=0, replies=0):
     return {
@@ -143,6 +166,22 @@ class TwitterViewerFetchTest(unittest.TestCase):
         asyncio.get_event_loop().close()
         asyncio.set_event_loop(None)
         self.temp_dir.cleanup()
+
+    def reset_free_proxy_state(self):
+        for name in (
+                "_free_proxy", "_free_proxies", "_free_proxy_pool",
+                "_free_proxy_index", "_free_proxy_cache"):
+            if not hasattr(fetch, name):
+                continue
+            value = getattr(fetch, name)
+            if isinstance(value, list):
+                value.clear()
+            elif isinstance(value, dict):
+                value.clear()
+            elif isinstance(value, int):
+                setattr(fetch, name, 0)
+            else:
+                setattr(fetch, name, None)
 
     def viewer_payload(self):
         return {
@@ -255,6 +294,218 @@ class TwitterViewerFetchTest(unittest.TestCase):
         with patch.dict(os.environ, {"X_FETCH_STRATEGY": "twitter-viewer"}), \
                 patch.object(fetch.curl_requests, "get", return_value=ViewerResponse(
                     {"success": False, "error": "forbidden"}, 403)):
+            with self.assertRaises(fetch.ScraperUnavailableError):
+                fetch.fetch_source("alice")
+
+    def test_free_proxy_strategy_fetches_and_reuses_one_valid_proxy(self):
+        self.reset_free_proxy_state()
+        proxy_list = ProxyListResponse(
+            "invalid\n198.51.100.1:8080\n203.0.113.5:3128\n")
+        responses = []
+
+        def get(url, **kwargs):
+            if "proxyscrape.com" in url:
+                responses.append((url, kwargs))
+                return proxy_list
+            responses.append((url, kwargs))
+            return ViewerResponse(self.viewer_payload())
+
+        def requests_get(url, **kwargs):
+            if "proxyscrape.com" in url:
+                return get(url, **kwargs)
+            return ViewerResponse(content=b"media")
+
+        with patch.dict(os.environ,
+                        {"X_FETCH_STRATEGY": "twitter-viewer-free-proxy"}), \
+                patch.object(fetch.curl_requests, "get", side_effect=get), \
+                patch.object(fetch.requests, "get", side_effect=requests_get), \
+                patch.object(fetch, "TMP_DIR", self.tmp_path):
+            first = fetch.fetch_source("alice")
+            second = fetch.fetch_source("bob")
+
+        self.assertTrue(first)
+        self.assertTrue(second)
+        proxy_calls = [kwargs for _, kwargs in responses
+                       if "proxy" in kwargs]
+        self.assertGreaterEqual(len(proxy_calls), 2)
+        self.assertEqual(proxy_calls[0]["proxy"], proxy_calls[1]["proxy"])
+        self.assertIn(proxy_calls[0]["proxy"], {
+            "http://198.51.100.1:8080", "http://203.0.113.5:3128",
+        })
+        self.assertTrue(all(kwargs.get("impersonate") == "chrome"
+                            for kwargs in proxy_calls))
+        self.assertTrue(all(kwargs.get("verify", True)
+                            for kwargs in proxy_calls))
+        list_calls = [(url, kwargs) for url, kwargs in responses
+                      if "proxyscrape.com" in url]
+        self.assertEqual(len(list_calls), 1)
+        url, kwargs = list_calls[0]
+        query = kwargs.get("params", {})
+        if query:
+            self.assertEqual({key: str(value) for key, value in query.items()}, {
+                "request": "getproxies",
+                "protocol": "http",
+                "ssl": "yes",
+                "anonymity": "elite",
+                "timeout": "3000",
+                "country": "all",
+            })
+        else:
+            for value in (
+                    "request=getproxies", "protocol=http", "ssl=yes",
+                    "anonymity=elite", "timeout=3000", "country=all"):
+                self.assertIn(value, url)
+
+    def test_free_proxy_strategy_rotates_after_viewer_failure(self):
+        self.reset_free_proxy_state()
+        proxy_list = ProxyListResponse(
+            "198.51.100.1:8080\n203.0.113.5:3128\n")
+        viewer_calls = []
+
+        def get(url, **kwargs):
+            if "proxyscrape.com" in url:
+                return proxy_list
+            viewer_calls.append(kwargs)
+            if len(viewer_calls) == 1:
+                return ViewerResponse({"success": False, "error": "blocked"}, 403)
+            return ViewerResponse(self.viewer_payload())
+
+        def requests_get(url, **kwargs):
+            if "proxyscrape.com" in url:
+                return get(url, **kwargs)
+            return ViewerResponse(content=b"media")
+
+        with patch.dict(os.environ,
+                        {"X_FETCH_STRATEGY": "twitter-viewer-free-proxy"}), \
+                patch.object(fetch.curl_requests, "get", side_effect=get), \
+                patch.object(fetch.requests, "get", side_effect=requests_get), \
+                patch.object(fetch, "TMP_DIR", self.tmp_path):
+            result = fetch.fetch_source("alice")
+
+        self.assertTrue(result)
+        self.assertEqual(len(viewer_calls), 2)
+        self.assertNotEqual(viewer_calls[0]["proxy"], viewer_calls[1]["proxy"])
+
+    def test_free_proxy_strategy_does_not_rotate_for_not_found_or_protected(self):
+        cases = [
+            ({"success": False, "error": "User not found"}, 404, "missing"),
+            ({"success": False, "error": "Account is protected"}, 403,
+             "private"),
+        ]
+        for payload, status_code, handle in cases:
+            with self.subTest(handle=handle):
+                self.reset_free_proxy_state()
+                proxy_list = ProxyListResponse(
+                    "198.51.100.1:8080\n203.0.113.5:3128\n")
+                viewer_calls = []
+
+                def get(url, **kwargs):
+                    if "proxyscrape.com" in url:
+                        return proxy_list
+                    viewer_calls.append(kwargs)
+                    if len(viewer_calls) == 1:
+                        return ViewerResponse(payload, status_code)
+                    return ViewerResponse(self.viewer_payload())
+
+                def requests_get(url, **kwargs):
+                    if "proxyscrape.com" in url:
+                        return get(url, **kwargs)
+                    return ViewerResponse(content=b"media")
+
+                with patch.dict(os.environ, {
+                        "X_FETCH_STRATEGY": "twitter-viewer-free-proxy"}), \
+                        patch.object(fetch.curl_requests, "get", side_effect=get), \
+                        patch.object(fetch.requests, "get", side_effect=requests_get), \
+                        patch.object(fetch, "TMP_DIR", self.tmp_path):
+                    with self.assertRaises(fetch.SourceReadError):
+                        fetch.fetch_source(handle)
+                    result = fetch.fetch_source("alice")
+
+                self.assertTrue(result)
+                self.assertEqual(len(viewer_calls), 2)
+                self.assertEqual(viewer_calls[0]["proxy"],
+                                 viewer_calls[1]["proxy"])
+
+    def test_free_proxy_strategy_fails_when_proxy_list_is_empty(self):
+        self.reset_free_proxy_state()
+        with patch.dict(os.environ,
+                        {"X_FETCH_STRATEGY": "twitter-viewer-free-proxy"}), \
+                patch.object(fetch.curl_requests, "get",
+                             return_value=ProxyListResponse("\n")), \
+                patch.object(fetch.requests, "get",
+                             return_value=ProxyListResponse("\n")):
+            with self.assertRaises(fetch.ScraperUnavailableError):
+                fetch.fetch_source("alice")
+
+    def test_free_proxy_strategy_attempts_at_most_five_proxies(self):
+        self.reset_free_proxy_state()
+        proxy_list = ProxyListResponse("\n".join(
+            f"198.51.100.{i}:8080" for i in range(1, 8)))
+        viewer_calls = []
+
+        def get(url, **kwargs):
+            if "proxyscrape.com" in url:
+                return proxy_list
+            viewer_calls.append(kwargs)
+            return ViewerResponse({"success": False, "error": "blocked"}, 503)
+
+        with patch.dict(os.environ,
+                        {"X_FETCH_STRATEGY": "twitter-viewer-free-proxy"}), \
+                patch.object(fetch.curl_requests, "get", side_effect=get), \
+                patch.object(fetch.requests, "get", side_effect=get):
+            with self.assertRaises(fetch.ScraperUnavailableError):
+                fetch.fetch_source("alice")
+
+        self.assertEqual(len(viewer_calls), 5)
+
+    def test_free_proxy_strategy_rotates_on_network_rate_limit_and_bad_json(self):
+        failures = [
+            fetch.CurlRequestException("connection timeout"),
+            ViewerResponse({"success": False, "error": "rate limited"}, 429),
+            ViewerResponse({"success": False, "error": "upstream"}, 503),
+            InvalidJsonResponse(),
+        ]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                self.reset_free_proxy_state()
+                proxy_list = ProxyListResponse(
+                    "198.51.100.1:8080\n203.0.113.5:3128\n")
+                viewer_calls = []
+
+                def get(url, **kwargs):
+                    if "proxyscrape.com" in url:
+                        return proxy_list
+                    viewer_calls.append(kwargs)
+                    if len(viewer_calls) == 1:
+                        if isinstance(failure, Exception):
+                            raise failure
+                        return failure
+                    return ViewerResponse(self.viewer_payload())
+
+                def requests_get(url, **kwargs):
+                    if "proxyscrape.com" in url:
+                        return get(url, **kwargs)
+                    return ViewerResponse(content=b"media")
+
+                with patch.dict(os.environ, {
+                        "X_FETCH_STRATEGY": "twitter-viewer-free-proxy"}), \
+                        patch.object(fetch.curl_requests, "get", side_effect=get), \
+                        patch.object(fetch.requests, "get", side_effect=requests_get), \
+                        patch.object(fetch, "TMP_DIR", self.tmp_path):
+                    result = fetch.fetch_source("alice")
+
+                self.assertTrue(result)
+                self.assertEqual(len(viewer_calls), 2)
+                self.assertNotEqual(viewer_calls[0]["proxy"],
+                                    viewer_calls[1]["proxy"])
+
+    def test_free_proxy_strategy_fails_when_proxy_list_request_is_unavailable(self):
+        self.reset_free_proxy_state()
+        failure = fetch.CurlRequestException("connection timeout")
+        with patch.dict(os.environ,
+                        {"X_FETCH_STRATEGY": "twitter-viewer-free-proxy"}), \
+                patch.object(fetch.curl_requests, "get", side_effect=failure), \
+                patch.object(fetch.requests, "get", side_effect=failure):
             with self.assertRaises(fetch.ScraperUnavailableError):
                 fetch.fetch_source("alice")
 
