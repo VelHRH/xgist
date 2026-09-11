@@ -255,11 +255,11 @@ def _viewer_error(handle: str, response: requests.Response,
 
 
 def _viewer_page(handle: str, cursor: str = "",
-                 proxy: str | None = None) -> dict:
+                 proxy: str | None = None, timeout: int = 30) -> dict:
     kwargs = {
         "params": {"username": handle.lower(), "cursor": cursor},
         "headers": _VIEWER_HEADERS,
-        "timeout": 30,
+        "timeout": timeout,
         "impersonate": "chrome",
     }
     if proxy:
@@ -333,9 +333,9 @@ def _free_proxy_page(handle: str, cursor: str = "") -> dict:
     candidates = ([] if _free_proxy is None else [_free_proxy])
     candidates.extend(proxy for proxy in pool if proxy != _free_proxy)
     last_error: ScraperUnavailableError | None = None
-    for proxy in candidates[:5]:
+    for attempt, proxy in enumerate(candidates[:12], 1):
         try:
-            data = _viewer_page(handle, cursor, proxy)
+            data = _viewer_page(handle, cursor, proxy, 10)
             _free_proxy = proxy
             return data
         except SourceReadError:
@@ -343,6 +343,8 @@ def _free_proxy_page(handle: str, cursor: str = "") -> dict:
             raise
         except ScraperUnavailableError as exc:
             last_error = exc
+            log.warning("free proxy attempt %d failed for @%s: %s",
+                        attempt, handle, exc)
             _free_proxy_pool = tuple(
                 item for item in (_free_proxy_pool or ()) if item != proxy)
             if _free_proxy == proxy:

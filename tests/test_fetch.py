@@ -437,10 +437,10 @@ class TwitterViewerFetchTest(unittest.TestCase):
             with self.assertRaises(fetch.ScraperUnavailableError):
                 fetch.fetch_source("alice")
 
-    def test_free_proxy_strategy_attempts_at_most_five_proxies(self):
+    def test_free_proxy_strategy_attempts_at_most_twelve_proxies(self):
         self.reset_free_proxy_state()
         proxy_list = ProxyListResponse("\n".join(
-            f"198.51.100.{i}:8080" for i in range(1, 8)))
+            f"198.51.100.{i}:8080" for i in range(1, 15)))
         viewer_calls = []
 
         def get(url, **kwargs):
@@ -456,7 +456,7 @@ class TwitterViewerFetchTest(unittest.TestCase):
             with self.assertRaises(fetch.ScraperUnavailableError):
                 fetch.fetch_source("alice")
 
-        self.assertEqual(len(viewer_calls), 5)
+        self.assertEqual(len(viewer_calls), 12)
 
     def test_free_proxy_strategy_rotates_on_network_rate_limit_and_bad_json(self):
         failures = [
