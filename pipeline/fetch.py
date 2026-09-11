@@ -384,7 +384,8 @@ def _download_viewer_media(tweet_id: str, media: list[dict],
     return paths
 
 
-def _fetch_with_viewer(handle: str, page_fetcher=_viewer_page) -> list[dict]:
+def _fetch_with_viewer(handle: str, page_fetcher=_viewer_page,
+                       page_limit: int | None = None) -> list[dict]:
     dest = TMP_DIR / handle.lower()
     dest.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
@@ -392,6 +393,8 @@ def _fetch_with_viewer(handle: str, page_fetcher=_viewer_page) -> list[dict]:
     cursor = ""
     pages = 0
     max_pages = max(1, (FETCH_RANGE + 19) // 20 + 2)
+    if page_limit is not None:
+        max_pages = min(max_pages, page_limit)
 
     while len(rows) < FETCH_RANGE and pages < max_pages:
         data = page_fetcher(handle, cursor)
@@ -473,7 +476,7 @@ class TwitterViewerStrategy(XDataStrategy):
 
 class FreeProxyTwitterViewerStrategy(XDataStrategy):
     def fetch_source(self, handle: str) -> list[dict]:
-        return _fetch_with_viewer(handle, _free_proxy_page)
+        return _fetch_with_viewer(handle, _free_proxy_page, 1)
 
     async def validate(self, handle: str) -> str:
         return await _validate_with_viewer(handle, _free_proxy_page)

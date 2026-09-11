@@ -386,6 +386,32 @@ class TwitterViewerFetchTest(unittest.TestCase):
         self.assertEqual(len(viewer_calls), 2)
         self.assertNotEqual(viewer_calls[0]["proxy"], viewer_calls[1]["proxy"])
 
+    def test_free_proxy_strategy_fetches_only_the_first_page(self):
+        self.reset_free_proxy_state()
+        payload = self.viewer_payload()
+        payload["data"]["pagination"] = {
+            "hasMore": True,
+            "nextCursor": "next-page",
+        }
+        viewer_calls = []
+
+        def get(url, **kwargs):
+            if "proxyscrape.com" in url:
+                return ProxyListResponse("198.51.100.1:8080\n")
+            viewer_calls.append(kwargs)
+            return ViewerResponse(payload)
+
+        with patch.dict(os.environ,
+                        {"X_FETCH_STRATEGY": "twitter-viewer-free-proxy"}), \
+                patch.object(fetch.curl_requests, "get", side_effect=get), \
+                patch.object(fetch.requests, "get",
+                             return_value=ViewerResponse(content=b"media")), \
+                patch.object(fetch, "TMP_DIR", self.tmp_path):
+            result = fetch.fetch_source("alice")
+
+        self.assertTrue(result)
+        self.assertEqual(len(viewer_calls), 1)
+
     def test_free_proxy_strategy_does_not_rotate_for_not_found_or_protected(self):
         cases = [
             ({"success": False, "error": "User not found"}, 404, "missing"),
